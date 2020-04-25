@@ -1,0 +1,1 @@
+placeholder for readthedoc setup might try shpinx instead of mkdocs (if works)
