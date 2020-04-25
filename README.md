@@ -16,6 +16,8 @@ K8S controller for fortigate in python
     lb.fortigate.fortinet.com/policy: {type: ctrl|fmg|manual, }
     lb.fortigate.fortinet.com/externalip: X.X.X.X
     lb.fortigate.fortinet.com/application-profile: "true"
+    lb.fortigate.fortinet.com/https-cert: ??  ## TODO figure what we can do here to ref or load a cert
+    
 
 # usage
 
