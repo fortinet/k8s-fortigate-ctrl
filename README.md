@@ -21,6 +21,7 @@ K8S controller for fortigate in python
     lb.fortigate.fortinet.com/https-cert: ??  ## TODO figure what we can do here to ref or load a cert
 ```
 
+Annotation or config-map on the controllers for the FGT ip.
 
 # usage
 
