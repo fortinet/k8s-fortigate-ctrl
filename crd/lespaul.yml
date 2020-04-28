@@ -1,7 +1,0 @@
-apiVersion: "kool.karmalabs.local/v1"
-kind: Guitar
-metadata:
-  name: lespaul
-spec:
-  brand: epiphone
-  review: false

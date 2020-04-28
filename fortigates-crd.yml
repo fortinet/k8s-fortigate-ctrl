@@ -9,6 +9,6 @@ spec:
   names:
     plural: fortigates
     singular: fortigate
-    kind: Firewall
+    kind: FortigateLB
     shortNames:
      - fgt
