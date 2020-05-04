@@ -22,6 +22,7 @@ related to pods to occur within the `timeout_seconds` threshold..metadata.resour
 from kubernetes import client, config, watch
 import json
 import os
+from pprint import pprint
 
 def main():
     # Configs can be set in Configuration class directly or using helper
@@ -37,7 +38,7 @@ def main():
     endp_resversion = endpoints.metadata.resource_version
     print (endp_resversion)
     for event in w.stream(v1.list_endpoints_for_all_namespaces,  field_selector="metadata.namespace!=kube-system", resource_version=endp_resversion,timeout_seconds=10, pretty='true'):
-        #print(event)
+        pprint(event)
         print("Event: %s %s %s" % (event['type'], event['object'].metadata.name, event['object'].metadata.annotations ))
         count -= 1
         if not count:
@@ -45,7 +46,7 @@ def main():
     print("Finished endpoints stream.")
 ##
     for event in w.stream(v1.list_service_for_all_namespaces, label_selector="app", timeout_seconds=100):
-
+        pprint(event)
         print("Event: %s %s %s" % (
             event['type'],
             event['object'].kind,

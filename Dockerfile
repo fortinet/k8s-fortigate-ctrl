@@ -1,7 +1,7 @@
-FROM karmab/client-python-kubernetes
-MAINTAINER Karim Boumedhel <karimboumedhel@gmail.com>
+FROM fortinetsolutioncse/k8s-fgt-base
+LABEL maintainer="Nicolas Thomas <nthomas@fortinet.com>" provider="community"
 
 ADD controller.py /tmp
-ADD guitar.yml /tmp
+ADD fortigates-crd.yml /tmp
 
 ENTRYPOINT  ["python", "-u", "/tmp/controller.py"]

@@ -1,0 +1,13 @@
+apiVersion: "fortinet.com/v1"
+kind: Fortigate
+metadata:
+  name: fgt-az
+spec:
+  fgt-name: fgt-az
+  fgt-ip: 172.27.40.126
+  fgt-user: "fgtadmin:Fortin3t-aks"
+ # modify with controller
+#  lb:
+#    apps-ports: [{ "app":"front", "port": "80"} , {"app": "back", "port": "9090"} ]
+#  state: "up"
+#  license-expiration: "date"
