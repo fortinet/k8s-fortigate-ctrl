@@ -1,11 +1,11 @@
-apiVersion: "fortinet.com/v1"
-kind: Fortigate
+apiVersion: "fortigates.fortinet.com/v1"
+kind: LoadBalancerFortigate
 metadata:
-  name: fgt-az
+  name: azure-vote-front
 spec:
-  fgt-name: fgt-az
-  fgt-ip: 172.27.44.126
-  vdom: "root"
+  fgt: fgt-az
+  fgt-port: 80
+
 #will use controller-image: param modified by the controller use as name if not set by CRD
 # modify with controller
 #  state: "up"
