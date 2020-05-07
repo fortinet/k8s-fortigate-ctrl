@@ -10,6 +10,12 @@ If crd for a FGT delete controller must kill itself.
 Multiple LB per FGT, might need LB type HTTP, HTTPS, TCP... won't work for https.. 
 Need a CRD per LB !!
 
+##types CRD
+you must use :
+```shell script
+ kubectl apply -f fortigates-crd.yml --force
+```
+For type to be LoadBalancer
 
 ## TTD
 

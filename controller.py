@@ -1,6 +1,22 @@
-#K8S controller to have a load balancer on a fortigate
-# use and manipulate CRD for fortigates load balancer fortigates.
-# Use 1 controller per Fortigate the controller can create multiple LB per FGT.
+# Copyright 2020 Fortinet(c)
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""
+K8S controller to have a load balancer on a fortigate
+ use and manipulate CRD for fortigates load balancer fortigates.
+ Use 1 controller per Fortigate the controller can create multiple LB per FGT.
+"""
 
 import logging
 import json
@@ -22,6 +38,108 @@ fgt = FortiOSAPI()
 crtled_fgt_crd = ""
 fgt.debug("on")
 DOMAIN = "fortinet.com"
+list_of_applications=[]
+SERVICES_RESOURCE_VERSION = 0
+################################
+def initialize_fortigate(fgt_co):
+    # initialize the setup based on what is available at start to avoid repeat of old events.
+    ###Intialize based on discovered setup first to avoid re-runing failed events on streams
+    #print(os.uname().nodename)
+    # Setup the associated FGT with this controller (1 controller 1 FGT n LBs)
+    FGT_URL=os.getenv('FGT_URL')
+    # Initialize fgt connection
+    FGT_IP = FGT_URL.split("@")[1]
+    try:
+        user_passwd = FGT_URL.split("@")[0]
+    except KeyError:
+        pass
+    try:
+        FGT_USER = user_passwd.split(":")[0]
+        FGT_PASSWD = user_passwd.split(":")[1]
+    except KeyError:
+        # TODO Allow to pass a API KEY instead.
+        pass
+    metadata = fgt_co.get("metadata")
+    name = metadata.get("name")
+    print("in the initial setup for fgt-az: %s" % fgt_co['metadata']['name'])
+    fgt_co['spec']['user'] = FGT_USER
+    fgt_co['spec']['fgt-ip'] = FGT_IP
+    fgt.login(FGT_IP , FGT_USER, password=FGT_PASSWD, verify=False)
+    try:
+        fgt_co['spec']['fgt-publicip']=fgt.license()['results']['fortiguard']['fortigate_wan_ip']
+    except KeyError:
+        print("could not find the FGT public-ip which might be linked to license issue")
+        pass
+    except e:
+        print("ERROR trying to check license")
+        pass
+    fgt_co_status = crds.replace_cluster_custom_object(DOMAIN, "v1", "fortigates", name, fgt_co)
+    # get the new version of the object before changing status (or err)
+    if fgt.monitor('system', 'vdom-resource', mkey='select', vdom=fgt_co['spec']['vdom'])['status'] == 'success':
+        fgt_co_status['status']={ 'status': "connected" }
+    else:
+        fgt_co_status['status'] = {'status': "not managed"}
+    crds.replace_cluster_custom_object_status(DOMAIN, "v1", "fortigates", name, fgt_co_status )
+    # make the list/specs available globally
+    crtled_fgt_co=fgt_co_status
+
+def initialize_lb_for_service(lb_fgt,extport):
+    #port to listen on
+    #app-label must be json with the changes to make
+    # check the crd is there and good
+    metadata=lb_fgt['metadata']
+    print("adding service :%s" % metadata['name'])
+    pprint(lb_fgt)
+    if metadata['name'] not in list_of_applications:
+        list_of_applications.append(metadata['name'])
+    #create fgt loadbalancer name k8_≤app-name> http only for now (will be in CRD or annotations)
+    data = {
+        "type": "server-load-balance",
+        "ldb-method": "least-rtt",
+        "extintf": "port1",
+        "server-type": "http",
+# TODO add monitor            "monitor": [{"name": "http"}],
+    }
+    data["name"] = "K8S_"+metadata['namespace']+":"+metadata['name']
+    data["extport"]= extport
+    print("label of obj: %s"%metadata)
+    for endpoint in v1.list_namespaced_endpoints(metadata['namespace'],label_selector="app="+metadata['name']).items:
+        print("### ENDPOINT ###")
+        realserver_id=1
+        realservers=[]
+        for subset in endpoint.subsets:
+            for address in subset.addresses:
+                for port in subset.ports:
+#                        print("id: %s ip: %s port: %s " %(realserver_id,address.ip,port.port))
+                    realservers.append({"id": realserver_id, "ip": address.ip, "port": port.port, "status": "active"})
+                    realserver_id += 1
+    data["realservers"]=realservers
+    ## TODO find vdom, wanport and lanport in crd
+    ret = fgt.set('firewall', 'vip', vdom="root", data=data)
+    pprint(ret)
+    # create the policy to allow getting in
+    # TODO check if id is available or find another one create the virtual server LB policy (need its id)
+    ## fgt.get('firewall', 'policy', vdom="root", mkey=403)
+    data = {
+        'action': "accept",
+        'srcintf': [{"name": "port1"}],
+        'dstintf': [{"name": "port2"}],
+        'srcaddr': [{"name": "all"}],
+        'schedule': "always",
+        'service': [{"name": "HTTP"}],
+        'logtraffic': "all",
+        'inspection-mode': "proxy"
+    }
+    data["name"] = "K8S_"+metadata['namespace']+":"+metadata['name']
+    data["policyid"] = "8"+extport
+    #convention policyId is 8 (K8S) concat with the port number which must be unique per FGT
+    ##TODO be carefull with hardcoded policyid
+    data["extport"]= extport
+    data['dstaddr']= [{"name": "K8S_"+metadata['namespace']+":"+metadata['name']}]
+
+    ret2 = fgt.set('firewall', 'policy', vdom="root", data=data)
+    pprint(ret2)
+
 
 def fgt_logcheck():
     try:
@@ -36,6 +154,7 @@ def update_lb_for_service(operation,object):
     if operation == "ADDED" or operation == "MODIFIED":
         metadata=object.metadata
         print("adding service :%s" % metadata.name)
+        pprint(object)
         if metadata.name not in list_of_applications:
             list_of_applications.append(metadata.name)
         #create fgt loadbalancer name k8_≤app-name> http only for now (will be in CRD or annotations)
@@ -46,7 +165,7 @@ def update_lb_for_service(operation,object):
             "server-type": "http",
 # TODO add monitor            "monitor": [{"name": "http"}],
         }
-        data["name"] = "K8S_"+metadata.name
+        data["name"] = "K8S_"+metadata.namespace+":"+metadata.name
         annotations = json.loads(object.metadata.annotations['kubectl.kubernetes.io/last-applied-configuration'])
         data["extport"]= annotations['metadata']['annotations']["lb-fgts.fortigates.fortinet.com/port"]
         print("label of obj: %s"%metadata.labels)
@@ -61,7 +180,7 @@ def update_lb_for_service(operation,object):
                         realservers.append({"id": realserver_id, "ip": address.ip, "port": port.port, "status": "active"})
                         realserver_id += 1
         data["realservers"]=realservers
-        ## TODO find vdom in crd
+        ## TODO find vdom, wanport and lanport in crd
         ret = fgt.set('firewall', 'vip', vdom="root", data=data)
         pprint(ret)
         # create the policy to allow getting in
@@ -77,11 +196,11 @@ def update_lb_for_service(operation,object):
             'logtraffic': "all",
             'inspection-mode': "proxy"
         }
-        data["name"] = "K8S_"+metadata.name
-        data["policyid"] = "4"+annotations['metadata']['annotations']["lb-fgts.fortigates.fortinet.com/port"]
+        data["name"] = "K8S_"+metadata.namespace+":"+metadata.name
+        data["policyid"] = "8"+annotations['metadata']['annotations']["lb-fgts.fortigates.fortinet.com/port"]
         ##TODO be carefull with hardcoded policyid
         data["extport"]= annotations['metadata']['annotations']["lb-fgts.fortigates.fortinet.com/port"]
-        data['dstaddr']= [{"name": "K8S_"+metadata.name}]
+        data['dstaddr']= [{"name": "K8S_"+metadata.namespace+":"+metadata.name}]
 
         ret2 = fgt.set('firewall', 'policy', vdom="root", data=data)
         pprint(ret2)
@@ -110,22 +229,8 @@ def update_fgt(operation, obj, crd):
 #     print("Updating: %s" % name)
 #     crds.replace_namespaced_custom_object(DOMAIN, "v1", namespace, "fortigates", name, obj)
 
-
+LB_FGTS_RESOURCES_VERSION = 0
 if __name__ == "__main__":
-    print(os.uname().nodename)
-    FGT_URL=os.getenv('FGT_URL')
-    # Initialize fgt connection
-    FGT_IP = FGT_URL.split("@")[1]
-    try:
-        user_passwd = FGT_URL.split("@")[0]
-    except KeyError:
-        pass
-    try:
-        FGT_USER = user_passwd.split(":")[0]
-        FGT_PASSWD = user_passwd.split(":")[1]
-    except KeyError:
-        # TODO Allow to pass a API KEY instead.
-        pass
 
     if 'KUBERNETES_PORT' in os.environ:
         config.load_incluster_config()
@@ -136,9 +241,12 @@ if __name__ == "__main__":
     configuration = client.Configuration()
     configuration.assert_hostname = False
     api_client = client.api_client.ApiClient(configuration=configuration)
+    #handler for CRDs
     v1crd = client.ApiextensionsV1beta1Api(api_client)
+    # handler for namespace/service/endpoints
+    v1 = client.CoreV1Api()
+
     current_crds = [x['spec']['names']['kind'].lower() for x in v1crd.list_custom_resource_definition().to_dict()['items']]
-    pprint(current_crds)
     if 'fortigate' not in current_crds:
         print("You must apply Fortigates CRD definition first")
         exit(2) # linked to https://github.com/kubernetes-client/python/issues/376
@@ -148,46 +256,45 @@ if __name__ == "__main__":
         v1crd.create_custom_resource_definition(body) # TODO check why this fails but apply works
 
     crds = client.CustomObjectsApi(api_client)
-    fortigates_crd = crds.list_cluster_custom_object(DOMAIN,"v1","fortigates")['items']
-    fgt_names = [x['metadata']['name'] for x in fortigates_crd ]
-    # update/create the crd of the Fortigate we do control
-    #if add on infos is already there we keep it
-    for fgt_crd in fortigates_crd:
-        pprint(fgt_crd)
-        metadata = fgt_crd.get("metadata")
-        name = metadata.get("name")
-        namespace = metadata.get("namespace")
-        ## TODO check and ensure unicity of the controller name etc.. we rely on good crd data here
-        if fgt_crd['metadata']['name'] == os.getenv('FGT_NAME'):
-            fgt_crd['spec']['controller'] = os.uname().nodename
-            print("in the initial setup for fgt-az: %s" % fgt_crd['metadata']['name'])
-            fgt_crd['spec']['user'] = FGT_USER
-            fgt_crd['spec']['fgt-ip'] = FGT_IP
-            vdom = fgt_crd['spec'].get("vdom")
-            if not vdom:
-                vdom="root"
-                fgt_crd['spec']["vdom"]=vdom
-            print(" FGT URL : %s:%s@%s"%(FGT_USER,FGT_PASSWD,FGT_IP))
-            fgt.login(FGT_IP , FGT_USER, password=FGT_PASSWD, verify=False)
+    ## get or create the custom object (Cluster) for the FGT
+    try:
+        fgt_co = crds.get_cluster_custom_object(DOMAIN,"v1","fortigates",os.getenv('FGT_NAME'))
+    except client.rest.ApiException:
+        print("CREATE a NEW FGT object")
+        # if no previous custom object  then create a generic
+        body = {"apiVersion": "fortinet.com/v1", "kind": "Fortigate",
+                "spec": {"vdom": "root"}, "scope": "Cluster" , "wanintf": "port1"}
+        body['metadata']={"name": os.getenv('FGT_NAME') }
+        body['spec']['fgt-name']=os.getenv('FGT_NAME') ##TODO refactor this is redondant
+        crds.create_cluster_custom_object(DOMAIN,"v1","fortigates",body)
+        fgt_co = crds.get_cluster_custom_object(DOMAIN,"v1","fortigates",os.getenv('FGT_NAME'))
+    initialize_fortigate(fgt_co)
+    FGTS_RESOURCE_VERSION=fgt_co['metadata']['resourceVersion']
+    LBDOMAIN="fortigates.fortinet.com"
+    ## Look for annotations in services and update/create lb-fgt custom objets if needed
+    SERVICES_RESOURCE_VERSION=v1.list_service_for_all_namespaces(label_selector="app").metadata.resource_version
+    for service in v1.list_service_for_all_namespaces(label_selector="app").items:
+        if "lb-fgts.fortigates.fortinet.com/port" in service.metadata.annotations:
+            ## if this annotation is on then we create/update a loadbalancer on fortigate
+            # can add "fortigates.fortinet.com/name: myfgt" annotation if multiple FGT
+            metadata=service.metadata
             try:
-                fgt_crd['spec']['fgt-publicip']=fgt.license()['results']['fortiguard']['fortigate_wan_ip']
-            except KeyError:
-                print("could not find the FGT public-ip which might be linked to license issue")
-                pass
-            except e:
-                print("ERROR trying to check license")
-                pass
-            crds.replace_namespaced_custom_object(DOMAIN, "v1", namespace, "fortigates", name, fgt_crd)
-            fgt_crd['status']={ 'status': "connected" }
-            ##this only update the status even when the spec is changed need both
-            crds.replace_namespaced_custom_object_status(DOMAIN, "v1", namespace, "fortigates", name, fgt_crd )
-            # make the list/specs available globally
-            crtled_fgt_crd=fgt_crd
-    ##resource_versions are used to watch streams of change and not re run from beggining
-    fgts_resource_version = fgt_crd['metadata']['resourceVersion']
-    lb_fgts_resource_version = 0
+                lb_fgt_co=crds.get_namespaced_custom_object(LBDOMAIN,"v1",metadata.namespace,"lb-fgts", metadata.name)
+            except:
+                print("CREATE a NEW LB-FGT object")
+                # if no previous custom object  then create a generic
+                body = {"apiVersion": "fortigates.fortinet.com/v1", "kind": "LoadBalancer",
+                        "spec": {"fgt-port": "00"}}
+                body['metadata'] = { "name": metadata.name }
+                body['spec']['fgt-name'] = os.getenv('FGT_NAME')
+                crds.create_namespaced_custom_object(LBDOMAIN, "v1",metadata.namespace, "lb-fgts", body)
+                lb_fgt_co=crds.get_namespaced_custom_object(LBDOMAIN,"v1",metadata.namespace,"lb-fgts", metadata.name)
+            initialize_lb_for_service(lb_fgt_co,metadata.annotations["lb-fgts.fortigates.fortinet.com/port"])
+            # set the resource pointer to the current version
+    LB_FGTS_RESOURCES_VERSION = crds.list_cluster_custom_object(LBDOMAIN, "v1", "lb-fgts")['metadata']['resourceVersion']
+
     endpoints_resource_version = 0
-    services_resource_version = 0
+
     # Global list of applications for which we manage LB
     list_of_applications =[]
     timeout=2 #make it small for dev TODO increase in prod
@@ -195,35 +302,34 @@ if __name__ == "__main__":
     print("")
     print('_____________________________')
 
-v1 = client.CoreV1Api()
+
 while True:
-        ##will need to be carefull on the order of checks to be sure
-        DOMAIN="fortigates.fortinet.com"
+
         ## Watch and react to change on loadbalancerfortigate CRD (= changes to LB configs)
-        stream = watch.Watch().stream(crds.list_cluster_custom_object, DOMAIN, "v1", "lb-fgts",
-                                      resource_version= lb_fgts_resource_version, timeout_seconds=timeout)
+        stream = watch.Watch().stream(crds.list_cluster_custom_object, LBDOMAIN, "v1", "lb-fgts",
+                                      resource_version= LB_FGTS_RESOURCES_VERSION, timeout_seconds=timeout)
         count = 15
         for event in stream:
             operation = event['type']
             obj = event["object"]
             metadata = obj.get("metadata")
-            print("Handling %s on %s" % (operation, name))
+            print("Handling %s on %s" % (operation, metadata.name))
             pprint(obj)
             # update the version # to not process old events
             count -= 1
             if not count:
                 watch.stop()
             if metadata:
-                lb_fgts_resource_version = metadata['resourceVersion']
+                LB_FGTS_RESOURCES_VERSION = metadata['resourceVersion']
             else:
                 # assume that the stream is having issue and resync to the last good version
                 if operation == "ERROR":
-                    lb_fgts_resource_version= crds.list_cluster_custom_object( DOMAIN, "v1", "lb-fgts")['metadata']['resourceVersion']
-        print("end processing LB FGTs events %s" % lb_fgts_resource_version)
+                    LB_FGTS_RESOURCES_VERSION= crds.list_cluster_custom_object( DOMAIN, "v1", "lb-fgts")['metadata']['resourceVersion']
+        print("end processing LB FGTs events %s" % LB_FGTS_RESOURCES_VERSION)
 
         ## Watch and react to change on fortigates CRD (= changes to FGT config)
         stream = watch.Watch().stream(crds.list_cluster_custom_object, "fortinet.com", "v1", "fortigates",
-                                      resource_version=fgts_resource_version, timeout_seconds=timeout)
+                                      resource_version=FGTS_RESOURCE_VERSION, timeout_seconds=timeout)
         count=15
         for event in stream:
             pprint(event)
@@ -231,24 +337,24 @@ while True:
             obj = event["object"]
             metadata = obj.get("metadata")
             if metadata:
-                if metadata['name'] == fgt_crd['metadata']['name']:
-                    print("Handling %s on %s" % (operation, name))
+                if metadata['name'] == fgt_co['metadata']['name']:
+                    print("Handling %s on %s" % (operation, metadata['name']))
                     pprint(obj)
-                    update_fgt(operation, obj, fgt_crd)
+                    update_fgt(operation, obj, fgt_co)
                 # update the version # to not process old events
-                fgts_resource_version = metadata['resourceVersion']
+                FGTS_RESOURCE_VERSION = metadata['resourceVersion']
             else:
                 # assume that the stream is having issue and resync to the last good version getting ERROR too old msg
                 if operation == "ERROR":
-                    fgts_resource_version = crds.list_cluster_custom_object("fortinet.com", "v1", "fortigates")['metadata']['resourceVersion']
+                    FGTS_RESOURCE_VERSION = crds.list_cluster_custom_object("fortinet.com", "v1", "fortigates")['metadata']['resourceVersion']
             count -= 1
             if not count:
                 watch.stop()
-        print("end processing FGTs events %s" % fgts_resource_version)
+        print("end processing FGTs events %s" % FGTS_RESOURCE_VERSION)
 
 
 
-        count = 50
+        count = 15
         w = watch.Watch()
         # tried with  field_selector="metadata.namespace!=kube-system" but end in error in API
         for event in w.stream(v1.list_endpoints_for_all_namespaces,
@@ -257,27 +363,32 @@ while True:
             if object.metadata.namespace != "kube-system":
                 print("Event: %s %s / %s" % (event['type'], object.metadata.name, object.metadata.namespace ))
             count -= 1
+            ## should get the max # in the list dict and +1 len of dict can result in colisions
+            # for finding the id in realserver struct
             endpoints_resource_version=object.metadata.resource_version
             if not count:
                 w.stop()
         print("Finished endpoints stream: %s" % endpoints_resource_version)
-    ##
-        for event in w.stream(v1.list_service_for_all_namespaces, resource_version=services_resource_version ,
+
+        count = 15
+        for event in w.stream(v1.list_service_for_all_namespaces, resource_version=SERVICES_RESOURCE_VERSION ,
                               label_selector="app", timeout_seconds=timeout):
+
             object = event.get("object")
-            annotations= json.loads(object.metadata.annotations['kubectl.kubernetes.io/last-applied-configuration'])
             print("Event: %s %s %s" % (
                 event['type'],
                 object.kind,
-                annotations['metadata'])
-            )
+                object.metadata)
+                  )
+            annotations= json.loads(object.metadata.annotations['kubectl.kubernetes.io/last-applied-configuration'])
+
             if "lb-fgts.fortigates.fortinet.com/port" in annotations['metadata']['annotations']:
                 ## if this annotation is on then we create/update a loadbalancer on fortigate
                 #can add "fortigates.fortinet.com/name: myfgt" annotation if multiple FGT
                 update_lb_for_service(event['type'],object)
-            services_resource_version=object.metadata.resource_version
+            SERVICES_RESOURCE_VERSION=object.metadata.resource_version
             count -= 1
             if not count:
                 w.stop()
-        print("Finished service stream rev: %s" % services_resource_version )
+        print("Finished service stream rev: %s" % SERVICES_RESOURCE_VERSION )
 

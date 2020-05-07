@@ -1,5 +1,5 @@
 apiVersion: "fortigates.fortinet.com/v1"
-kind: LoadBalancerFortigate
+kind: LoadBalancer
 metadata:
   name: azure-vote-front
 spec:
