@@ -25,6 +25,16 @@ from kubernetes import client, config, watch
 import os
 from pprint import pprint
 from fortiosapi import FortiOSAPI
+import signal
+import sys
+
+def signal_handler(sig, frame):
+    # catch the stop condition to release the fgt session
+    print('You pressed Ctrl+C! disconnecting firewall before exit')
+    fgt.logout()
+    sys.exit(3)
+signal.signal(signal.SIGINT, signal_handler)
+# must stop with ctrl+c rerun does SIGKILL and can't handle that
 
 formatter = logging.Formatter(
     '%(asctime)s %(name)-12s %(levelname)-8s %(message)s')
@@ -41,10 +51,12 @@ DOMAIN = "fortinet.com"
 list_of_applications=[]
 SERVICES_RESOURCE_VERSION = 0
 LB_FGTS_RESOURCES_VERSION = 0
+VDOM= "root"
 ################################
 def monitor_lb_co_status():
     ## use get monitor to update the status of all lb linked to this controlled fgt
     fgt_co_status = crds.get_cluster_custom_object_status(DOMAIN, "v1", "fortigates", os.getenv('FGT_NAME'))
+    LBS_INERROR=0 # must assigned here so not local to func
     try:
         fgt_lbs=fgt.monitor('firewall', 'load-balance',
                     mkey='select', vdom='root', parameters='count=999')
@@ -65,21 +77,30 @@ def monitor_lb_co_status():
         fgt_lb_results=fgt_lbs['results']
         metadata=lb_co['metadata']
         if lb_co['spec']['fgt'] == os.getenv('FGT_NAME'):
-            for vlb in fgt_lb_results:
-                if vlb['virtual_server_name'] == "K8S_"+metadata['namespace']+":"+metadata['name']:
-                    realserver_number=len(vlb['list'])
-                    realserver_ups=0
-                    for realserv in vlb['list']:
-                        if realserv['status'] == "up":
-                            realserver_ups += 1
-                    # update status with #servup/#servconf
-                    lb_co['status']['status'] = str(realserver_ups)+"/"+str(realserver_number)
-                else:
-                    try:
-                        lb_co['status']['status'] = "no config"
-                    except KeyError:
-                        # if Keyerror then status is empty
-                        lb_co['status'] = {'status': "no config"}
+            print ("handle %s with LBS ERROR= %s" % (lb_co['spec']['fgt'],LBS_INERROR))
+            if LBS_INERROR == 0:
+                for vlb in fgt_lb_results:
+                    if vlb['virtual_server_name'] == "K8S_"+metadata['namespace']+":"+metadata['name']:
+                        realserver_number=len(vlb['list'])
+                        realserver_ups=0
+                        for realserv in vlb['list']:
+                            if realserv['status'] == "up":
+                                realserver_ups += 1
+                        # update status with #servup/#servconf
+                        lb_co['status']['status'] = str(realserver_ups)+"/"+str(realserver_number)
+                    else:
+                        try:
+                            lb_co['status']['status'] = "no config"
+                        except KeyError:
+                            # if Keyerror then status is empty
+                            lb_co['status'] = {'status': "no config"}
+            else:
+                #this means fgt is not reachable
+                try:
+                    lb_co['status']['status'] = "error"
+                except KeyError:
+                    # if Keyerror then status is empty
+                    lb_co['status'] = {'status': "error"}
         crds.replace_namespaced_custom_object_status(LBDOMAIN, "v1", metadata['namespace'], "lb-fgts",
                                                          metadata['name'],
                                                          lb_co)
@@ -108,21 +129,32 @@ def initialize_fortigate(fgt_co):
     print("in the initial setup for fgt-az: %s" % fgt_co['metadata']['name'])
     fgt_co['spec']['user'] = FGT_USER
     fgt_co['spec']['fgt-ip'] = FGT_IP
-    fgt.login(FGT_IP , FGT_USER, password=FGT_PASSWD, verify=False)
+    if not fgt_co['spec']['vdom']:
+        fgt_co['spec']['vdom']="root"
+    VDOM=fgt_co['spec']['vdom']
+    LOGINERR=0
+    try:
+        fgt.login(FGT_IP , FGT_USER, password=FGT_PASSWD, verify=False)
+    except:
+        LOGINERR=1
+
     try:
         fgt_co['spec']['fgt-publicip']=fgt.license()['results']['fortiguard']['fortigate_wan_ip']
     except KeyError:
         print("could not find the FGT public-ip which might be linked to license issue")
         pass
-    except e:
+    except:
         print("ERROR trying to check license")
         pass
     fgt_co_status = crds.replace_cluster_custom_object(DOMAIN, "v1", "fortigates", name, fgt_co)
     # get the new version of the object before changing status (or err)
-    if fgt.monitor('system', 'vdom-resource', mkey='select', vdom=fgt_co['spec']['vdom'])['status'] == 'success':
-        fgt_co_status['status']={ 'status': "connected" }
+    if LOGINERR == 0:
+        if fgt.monitor('system', 'vdom-resource', mkey='select', vdom=fgt_co['spec']['vdom'])['status'] == 'success':
+            fgt_co_status['status']={ 'status': "connected" }
+        else:
+            fgt_co_status['status'] = {'status': "not managed"}
     else:
-        fgt_co_status['status'] = {'status': "not managed"}
+        fgt_co_status['status'] = {'status': "login error"}
     crds.replace_cluster_custom_object_status(DOMAIN, "v1", "fortigates", name, fgt_co_status )
     # make the list/specs available globally
     crtled_fgt_co=fgt_co_status
@@ -135,6 +167,7 @@ def initialize_lb_for_service(lb_fgt,extport):
     print("adding service :%s" % metadata['name'])
     if metadata['name'] not in list_of_applications:
         list_of_applications.append(metadata['name'])
+        pprint(list_of_applications)
     #create fgt loadbalancer name k8_≤app-name> http only for now (will be in CRD or annotations)
     data = {
         "type": "server-load-balance",
@@ -158,11 +191,13 @@ def initialize_lb_for_service(lb_fgt,extport):
                     realserver_id += 1
     data["realservers"]=realservers
     ## TODO find vdom, wanport and lanport in crd
-    ret = fgt.set('firewall', 'vip', vdom="root", data=data)
-    if ret['status'] == 'success':
-        UPDATED=0
-    else:
-        UPDATED=1
+    UPDATED = 0
+    try:
+        ret = fgt.set('firewall', 'vip', vdom="root", data=data)
+        if ret['status'] != 'success':
+            UPDATED = 1
+    except:
+        UPDATED = 1
     # create the policy to allow getting in
     # TODO check if id is available or find another one create the virtual server LB policy (need its id)
     ## fgt.get('firewall', 'policy', vdom="root", mkey=403)
@@ -182,12 +217,12 @@ def initialize_lb_for_service(lb_fgt,extport):
     ##TODO be carefull with hardcoded policyid
     data["extport"]= extport
     data['dstaddr']= [{"name": "K8S_"+metadata['namespace']+":"+metadata['name']}]
-
-    ret2 = fgt.set('firewall', 'policy', vdom="root", data=data)
-    if ret2['status'] == 'success' and ret['status'] == 'success':
-        UPDATED=0
-    else:
-        UPDATED=1
+    if UPDATED == 0:
+        ret2 = fgt.set('firewall', 'policy', vdom="root", data=data)
+        if ret2['status'] == 'success' and ret['status'] == 'success':
+            UPDATED=0
+        else:
+            UPDATED=1
     lb_fgt_co['spec']['fgt-port'] = extport
     lb_fgt_co['spec']['fgt'] = os.getenv('FGT_NAME')
     lb_fgt_co_status = crds.replace_namespaced_custom_object(LBDOMAIN, "v1", metadata['namespace'],
@@ -290,6 +325,47 @@ def update_fgt(operation, obj, crd):
 #
 #     print("Updating: %s" % name)
 #     crds.replace_namespaced_custom_object(DOMAIN, "v1", namespace, "fortigates", name, obj)
+def delete_lb_co(obj):
+    # First delete the policy on FGT
+    POLID= "8"+str(obj['spec']['fgt-port'])
+    ret=fgt.delete('firewall',"policy",vdom=VDOM,mkey=POLID)
+    print("## DELETE POLICY ##")
+    pprint(ret)
+
+
+def update_endp_for_service(object):
+    metadata=object.metadata
+    data={}
+    app_name=object.metadata.labels['app']
+    if app_name:
+        data["name"] = "K8S_" + metadata.namespace + ":" + app_name
+    try:
+        ret=fgt.get('firewall', 'vip', vdom="root", mkey=data["name"])
+    except:
+        print("Can not get %s VIP infos" % data["name"])
+    print("---------  Update endps")
+    if ret['status'] == 'succes':
+        # the FGT LB can be found
+        realserver_id = 1
+        realservers = []
+        for subset in object.subsets:
+            for address in subset.addresses:
+                for port in subset.ports:
+                    realservers.append(
+                        {"id": realserver_id, "ip": address.ip, "port": port.port, "status": "active"})
+                    realserver_id += 1
+        data["realservers"] = realservers
+        ## TODO find vdom, wanport and lanport in crd
+        ret = fgt.put('firewall', 'vip', vdom="root", mkey=data["name"], data=data)
+        UPDATED = 0
+        try:
+            ret = fgt.put('firewall', 'vip', vdom="root", mkey=data["name"], data=data)
+            pprint(ret)
+            if ret['status'] != 'success':
+                UPDATED = 1
+        except:
+            UPDATED = 1
+
 
 
 if __name__ == "__main__":
@@ -358,7 +434,7 @@ if __name__ == "__main__":
     endpoints_resource_version = 0
 
     # Global list of applications for which we manage LB
-    list_of_applications =[]
+
     timeout=2 #make it small for dev TODO increase in prod
     count=15
     print("")
@@ -376,17 +452,30 @@ while True:
             operation = event['type']
             obj = event["object"]
             metadata = obj.get("metadata")
+            if operation == "ADDED":
+                pass
+                # just adding a lb-fgt def do nothing you must have a service set up with annotations
+            elif operation == "MODIFIED":
+                # must check if service is active before changing
+                pass #modified_lb_for_service()
+            elif operation == "DELETED":
+                delete_lb_co(obj)
+            elif operation == "ERROR":
+                # this is usually due to a bad resource version pointer
+                LB_FGTS_RESOURCES_VERSION = crds.list_cluster_custom_object(DOMAIN, "v1", "lb-fgts")['metadata'][
+                    'resourceVersion']
+            else:
+                # should not arrive here
+                raise ValueError
+
+            if metadata:
+                # Covers ERROR case with empty metadata
+                print("Handling %s on %s" % (operation, metadata['name']))
+                LB_FGTS_RESOURCES_VERSION = metadata['resourceVersion']
             count -= 1
             if not count:
                 watch.stop()
-            if metadata:
-                print("Handling %s on %s" % (operation, metadata['name']))
-                pprint(obj)
-                LB_FGTS_RESOURCES_VERSION = metadata['resourceVersion']
-            else:
-                # assume that the stream is having issue and resync to the last good version
-                if operation == "ERROR":
-                    LB_FGTS_RESOURCES_VERSION= crds.list_cluster_custom_object( DOMAIN, "v1", "lb-fgts")['metadata']['resourceVersion']
+
         print("end processing LB FGTs events %s" % LB_FGTS_RESOURCES_VERSION)
 
         ## Watch and react to change on fortigates CRD (= changes to FGT config)
@@ -394,7 +483,6 @@ while True:
                                       resource_version=FGTS_RESOURCE_VERSION, timeout_seconds=timeout)
         count=15
         for event in stream:
-            pprint(event)
             operation = event['type']
             obj = event["object"]
             metadata = obj.get("metadata")
@@ -415,19 +503,29 @@ while True:
         print("end processing FGTs events %s" % FGTS_RESOURCE_VERSION)
 
 
-
+##ENDPOINTS WATCH
         count = 15
         w = watch.Watch()
         # tried with  field_selector="metadata.namespace!=kube-system" but end in error in API
         for event in w.stream(v1.list_endpoints_for_all_namespaces,
                               resource_version=endpoints_resource_version,timeout_seconds=timeout):
             object=event.get("object")
-            if object.metadata.namespace != "kube-system":
-                print("Event: %s %s / %s" % (event['type'], object.metadata.name, object.metadata.namespace ))
-            count -= 1
+            operation = event['type']
+            if operation == "ERROR":
+                endpoints_resource_version = v1.list_endpoints_for_all_namespaces().metadata.resource_version
+                # just adding a lb-fgt def do nothing you must have a service set up with annotations
+            if object.metadata.namespace != "kube-system" and object.metadata.labels:
+                print("in endp handler with list app %s" % list_of_applications)
+                pprint(object.metadata.labels)
+                if object.metadata.labels['app'] in list_of_applications:
+                    if operation != "ERROR":
+                        update_endp_for_service(object)
+                    print("Endp event: %s %s / %s" % (event['type'], object.metadata.name, object.metadata.namespace ))
             ## should get the max # in the list dict and +1 len of dict can result in colisions
             # for finding the id in realserver struct
+            #actually the endpoint update object resend the full list of endp so being brutal
             endpoints_resource_version=object.metadata.resource_version
+            count -= 1
             if not count:
                 w.stop()
         print("Finished endpoints stream: %s" % endpoints_resource_version)
