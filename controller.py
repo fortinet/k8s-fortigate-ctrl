@@ -42,6 +42,49 @@ list_of_applications=[]
 SERVICES_RESOURCE_VERSION = 0
 LB_FGTS_RESOURCES_VERSION = 0
 ################################
+def monitor_lb_co_status():
+    ## use get monitor to update the status of all lb linked to this controlled fgt
+    fgt_co_status = crds.get_cluster_custom_object_status(DOMAIN, "v1", "fortigates", os.getenv('FGT_NAME'))
+    try:
+        fgt_lbs=fgt.monitor('firewall', 'load-balance',
+                    mkey='select', vdom='root', parameters='count=999')
+    except:
+        # if pb this means we can not connect to FGT
+        # update status
+        # get the new version of the object before changing status (or err)
+        if monitored_lbs['status'] == 'success':
+            fgt_co_status['status'] = {'status': "connected"}
+            LBS_INERROR = 0
+        else:
+            fgt_co_status['status'] = {'status': "error"}
+            LBS_INERROR=1
+        crds.replace_cluster_custom_object_status(DOMAIN, "v1", "fortigates", os.getenv('FGT_NAME'), fgt_co_status)
+        # make the list/specs available globally
+    for lb_co in crds.list_cluster_custom_object(LBDOMAIN, "v1", "lb-fgts")['items']:
+        # must check on every lbs linked to this fgt or leave them
+        fgt_lb_results=fgt_lbs['results']
+        metadata=lb_co['metadata']
+        if lb_co['spec']['fgt'] == os.getenv('FGT_NAME'):
+            for vlb in fgt_lb_results:
+                if vlb['virtual_server_name'] == "K8S_"+metadata['namespace']+":"+metadata['name']:
+                    realserver_number=len(vlb['list'])
+                    realserver_ups=0
+                    for realserv in vlb['list']:
+                        if realserv['status'] == "up":
+                            realserver_ups += 1
+                    # update status with #servup/#servconf
+                    lb_co['status']['status'] = str(realserver_ups)+"/"+str(realserver_number)
+                else:
+                    try:
+                        lb_co['status']['status'] = "no config"
+                    except KeyError:
+                        # if Keyerror then status is empty
+                        lb_co['status'] = {'status': "no config"}
+        crds.replace_namespaced_custom_object_status(LBDOMAIN, "v1", metadata['namespace'], "lb-fgts",
+                                                         metadata['name'],
+                                                         lb_co)
+
+
 def initialize_fortigate(fgt_co):
     # initialize the setup based on what is available at start to avoid repeat of old events.
     ###Intialize based on discovered setup first to avoid re-runing failed events on streams
@@ -154,9 +197,7 @@ def initialize_lb_for_service(lb_fgt,extport):
         lb_fgt_co_status['status'] = {'status': "configured"}
     else:
         lb_fgt_co_status['status'] = {'status': "error"}
-    lb_fgt_co_status['spec']['fgt-port'] = extport
-    lb_fgt_co_status['spec']['fgt'] = os.getenv('FGT_NAME')
-    #TODO make a regular monitor check to update the status
+    #TODO update the service itself in K8S
     crds.replace_namespaced_custom_object_status(LBDOMAIN, "v1", metadata['namespace'], "lb-fgts", metadata['name'],
                                                  lb_fgt_co_status)
 
@@ -325,7 +366,8 @@ if __name__ == "__main__":
 
 
 while True:
-
+        ##update LB and FGT status if can get LB monitoring infos
+        monitor_lb_co_status()
         ## Watch and react to change on loadbalancerfortigate CRD (= changes to LB configs)
         stream = watch.Watch().stream(crds.list_cluster_custom_object, LBDOMAIN, "v1", "lb-fgts",
                                       resource_version= LB_FGTS_RESOURCES_VERSION, timeout_seconds=timeout)
@@ -334,13 +376,12 @@ while True:
             operation = event['type']
             obj = event["object"]
             metadata = obj.get("metadata")
-            print("Handling %s on %s" % (operation, metadata.name))
-            pprint(obj)
-            # update the version # to not process old events
             count -= 1
             if not count:
                 watch.stop()
             if metadata:
+                print("Handling %s on %s" % (operation, metadata['name']))
+                pprint(obj)
                 LB_FGTS_RESOURCES_VERSION = metadata['resourceVersion']
             else:
                 # assume that the stream is having issue and resync to the last good version
