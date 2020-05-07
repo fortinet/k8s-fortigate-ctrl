@@ -40,6 +40,7 @@ fgt.debug("on")
 DOMAIN = "fortinet.com"
 list_of_applications=[]
 SERVICES_RESOURCE_VERSION = 0
+LB_FGTS_RESOURCES_VERSION = 0
 ################################
 def initialize_fortigate(fgt_co):
     # initialize the setup based on what is available at start to avoid repeat of old events.
@@ -89,7 +90,6 @@ def initialize_lb_for_service(lb_fgt,extport):
     # check the crd is there and good
     metadata=lb_fgt['metadata']
     print("adding service :%s" % metadata['name'])
-    pprint(lb_fgt)
     if metadata['name'] not in list_of_applications:
         list_of_applications.append(metadata['name'])
     #create fgt loadbalancer name k8_≤app-name> http only for now (will be in CRD or annotations)
@@ -116,7 +116,10 @@ def initialize_lb_for_service(lb_fgt,extport):
     data["realservers"]=realservers
     ## TODO find vdom, wanport and lanport in crd
     ret = fgt.set('firewall', 'vip', vdom="root", data=data)
-    pprint(ret)
+    if ret['status'] == 'success':
+        UPDATED=0
+    else:
+        UPDATED=1
     # create the policy to allow getting in
     # TODO check if id is available or find another one create the virtual server LB policy (need its id)
     ## fgt.get('firewall', 'policy', vdom="root", mkey=403)
@@ -138,7 +141,24 @@ def initialize_lb_for_service(lb_fgt,extport):
     data['dstaddr']= [{"name": "K8S_"+metadata['namespace']+":"+metadata['name']}]
 
     ret2 = fgt.set('firewall', 'policy', vdom="root", data=data)
-    pprint(ret2)
+    if ret2['status'] == 'success' and ret['status'] == 'success':
+        UPDATED=0
+    else:
+        UPDATED=1
+    lb_fgt_co['spec']['fgt-port'] = extport
+    lb_fgt_co['spec']['fgt'] = os.getenv('FGT_NAME')
+    lb_fgt_co_status = crds.replace_namespaced_custom_object(LBDOMAIN, "v1", metadata['namespace'],
+                                                                    "lb-fgts", metadata['name'], lb_fgt_co)
+    pprint(lb_fgt_co_status)
+    if UPDATED == 0:
+        lb_fgt_co_status['status'] = {'status': "configured"}
+    else:
+        lb_fgt_co_status['status'] = {'status': "error"}
+    lb_fgt_co_status['spec']['fgt-port'] = extport
+    lb_fgt_co_status['spec']['fgt'] = os.getenv('FGT_NAME')
+    #TODO make a regular monitor check to update the status
+    crds.replace_namespaced_custom_object_status(LBDOMAIN, "v1", metadata['namespace'], "lb-fgts", metadata['name'],
+                                                 lb_fgt_co_status)
 
 
 def fgt_logcheck():
@@ -148,6 +168,7 @@ def fgt_logcheck():
         pass
 
 def update_lb_for_service(operation,object):
+##TODO replace redundant
     #port to listen on
     #app-label must be json with the changes to make
     # check the crd is there and good
@@ -229,7 +250,7 @@ def update_fgt(operation, obj, crd):
 #     print("Updating: %s" % name)
 #     crds.replace_namespaced_custom_object(DOMAIN, "v1", namespace, "fortigates", name, obj)
 
-LB_FGTS_RESOURCES_VERSION = 0
+
 if __name__ == "__main__":
 
     if 'KUBERNETES_PORT' in os.environ:
