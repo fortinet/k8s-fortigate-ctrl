@@ -77,7 +77,7 @@ def monitor_lb_co_status():
         fgt_lb_results=fgt_lbs['results']
         metadata=lb_co['metadata']
         if lb_co['spec']['fgt'] == os.getenv('FGT_NAME'):
-            print ("handle %s with LBS ERROR= %s" % (lb_co['spec']['fgt'],LBS_INERROR))
+            print("HAndling: % s" % lb_co['metadata']['name'])
             if LBS_INERROR == 0:
                 for vlb in fgt_lb_results:
                     if vlb['virtual_server_name'] == "K8S_"+metadata['namespace']+":"+metadata['name']:
@@ -88,12 +88,7 @@ def monitor_lb_co_status():
                                 realserver_ups += 1
                         # update status with #servup/#servconf
                         lb_co['status']['status'] = str(realserver_ups)+"/"+str(realserver_number)
-                    else:
-                        try:
-                            lb_co['status']['status'] = "no config"
-                        except KeyError:
-                            # if Keyerror then status is empty
-                            lb_co['status'] = {'status': "no config"}
+                        print("in good update status %s %s"% (vlb['virtual_server_name'] ,lb_co['status']['status']))
             else:
                 #this means fgt is not reachable
                 try:
@@ -101,7 +96,8 @@ def monitor_lb_co_status():
                 except KeyError:
                     # if Keyerror then status is empty
                     lb_co['status'] = {'status': "error"}
-        crds.replace_namespaced_custom_object_status(LBDOMAIN, "v1", metadata['namespace'], "lb-fgts",
+            ##TODO update the LB custom objects status not managed (not in monitor)
+            crds.replace_namespaced_custom_object_status(LBDOMAIN, "v1", metadata['namespace'], "lb-fgts",
                                                          metadata['name'],
                                                          lb_co)
 
@@ -171,10 +167,10 @@ def initialize_lb_for_service(lb_fgt,extport):
     #create fgt loadbalancer name k8_≤app-name> http only for now (will be in CRD or annotations)
     data = {
         "type": "server-load-balance",
-        "ldb-method": "least-rtt",
+        "ldb-method": "round-robin",
         "extintf": "port1",
         "server-type": "http",
-# TODO add monitor            "monitor": [{"name": "http"}],
+# TODO add monitor "monitor": [{"name": "http"}], so that RTT works be par of crd
     }
     data["name"] = "K8S_"+metadata['namespace']+":"+metadata['name']
     data["extport"]= extport
@@ -242,7 +238,14 @@ def fgt_logcheck():
         ret = fgt.get('firewall', 'vip', vdom=vdom) #TODO get vdom from CRD
     except e:
         pass
-
+def update_status_noservice():
+    return 'TODO'
+    ##TODO create a check to update the unmanaged LB to no service
+    # try:
+    #     lb_co['status']['status'] = "no service"
+    # except KeyError:
+    #     # if Keyerror then status is empty
+    #     lb_co['status'] = {'status': "no_service"}
 def update_lb_for_service(operation,object):
 ##TODO replace redundant
     #port to listen on
