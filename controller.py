@@ -331,6 +331,7 @@ def delete_lb_co(obj):
     ret=fgt.delete('firewall',"policy",vdom=VDOM,mkey=POLID)
     print("## DELETE POLICY ##")
     pprint(ret)
+    ##TODO remove vip on FGT change status info on lb-fgt custom object(function ?)
 
 
 def update_endp_for_service(object):
@@ -344,7 +345,7 @@ def update_endp_for_service(object):
     except:
         print("Can not get %s VIP infos" % data["name"])
     print("---------  Update endps")
-    if ret['status'] == 'succes':
+    if ret['status'] == 'success':
         # the FGT LB can be found
         realserver_id = 1
         realservers = []
@@ -354,18 +355,22 @@ def update_endp_for_service(object):
                     realservers.append(
                         {"id": realserver_id, "ip": address.ip, "port": port.port, "status": "active"})
                     realserver_id += 1
+                    # API doc says limited to 4 but test show 20ish works
+
         data["realservers"] = realservers
-        ## TODO find vdom, wanport and lanport in crd
-        ret = fgt.put('firewall', 'vip', vdom="root", mkey=data["name"], data=data)
+        ## API accept to put only certain value no need to check the others which can be changed when CRD changes
         UPDATED = 0
         try:
             ret = fgt.put('firewall', 'vip', vdom="root", mkey=data["name"], data=data)
-            pprint(ret)
             if ret['status'] != 'success':
                 UPDATED = 1
         except:
             UPDATED = 1
-
+        if UPDATED == 0:
+            return True
+        else:
+            #TODO change the status to error
+            return False
 
 
 if __name__ == "__main__":
@@ -520,6 +525,8 @@ while True:
                 if object.metadata.labels['app'] in list_of_applications:
                     if operation != "ERROR":
                         update_endp_for_service(object)
+                        # force monitor check to reflect faster the changes
+                        monitor_lb_co_status()
                     print("Endp event: %s %s / %s" % (event['type'], object.metadata.name, object.metadata.namespace ))
             ## should get the max # in the list dict and +1 len of dict can result in colisions
             # for finding the id in realserver struct
