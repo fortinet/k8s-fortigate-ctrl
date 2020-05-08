@@ -60,6 +60,7 @@ def monitor_lb_co_status():
     try:
         fgt_lbs=fgt.monitor('firewall', 'load-balance',
                     mkey='select', vdom='root', parameters='count=999')
+        # might use api/v2/monitor/firewall/load-balance?start=5&count=1 to target only configured ones
     except:
         # if pb this means we can not connect to FGT
         # update status

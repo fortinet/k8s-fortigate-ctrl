@@ -1,5 +1,8 @@
 # k8s-ctrl-fortigate
 K8S controller for fortigate in python
+THIS IS ALPHA DEMO CODE ! 
+no support, no help for now you have been warned 
+It is functionnal.
 
 # Goals
 - use loadbalancer annotation to implement LB in Fortigate
@@ -13,13 +16,26 @@ K8S controller for fortigate in python
 - use annotation on services like:
 
 ```shell script
-    service.beta.kubernetes.io/fortigate-load-balancer: "true"
-    lb.fortigate.fortinet.com/name: "myfgt"
-    lb.fortigate.fortinet.com/policy: {type: ctrl|fmg|manual, }
-    lb.fortigate.fortinet.com/externalip: X.X.X.X
-    lb.fortigate.fortinet.com/application-profile: "true"
-    lb.fortigate.fortinet.com/https-cert: ??  ## TODO figure what we can do here to ref or load a cert
+apiVersion: v1
+kind: Service
+metadata:
+  name: azure-vote2-front
+  labels:
+    app: azure-vote2-front
+  annotations:
+    lb-fgts.fortigates.fortinet.com/port: "90"
+spec:
+  type: LoadBalancer
+  # may try nodeport type to see if works better for K8S connector
+  ports:
+  - port: 80
+  selector:
+    app: azure-vote2-front
 ```
+
+The controller will use or create the necessary custom ressources fortigate and lb-fgts.
+
+
 
 Annotation or config-map on the controllers for the FGT ip.
 
