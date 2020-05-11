@@ -78,7 +78,9 @@ metadata:
     app: azure-vote2-front
   annotations:
     lb-fgts.fortigates.fortinet.com/port: "90"
+    service.beta.kubernetes.io/azure-load-balancer-resource-group: fortistacks-aks
 spec:
+  loadBalancerIP: 52.174.97.250
   type: LoadBalancer
   # may try nodeport type to see if works better for K8S connector
   ports:

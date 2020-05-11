@@ -40,4 +40,9 @@ The controller will use or create the necessary custom ressources fortigate and 
 Annotation or config-map on the controllers for the FGT ip.
 
 # usage
+# Tips
+To have a nice monitoring of kubectl states
 
+````shell script
+watch -c "kubectl get pods,lb-fgt,svc -o wide|ccze -A"
+````

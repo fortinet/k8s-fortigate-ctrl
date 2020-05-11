@@ -52,14 +52,15 @@ fgt = FortiOSAPI()
 crtled_fgt_crd = ""
 fgt.debug("on")
 DOMAIN = "fortinet.com"
-list_of_applications = []
+SERVICES_LIST = []
 SERVICES_RESOURCE_VERSION = 0
 LB_FGTS_RESOURCES_VERSION = 0
 VDOM = "root"
 
-
+def update_lb_status(lb_customobject):
+    pass
 ################################
-def monitor_lb_co_status():
+def monitor_lb_customobjects_status():
     ## use get monitor to update the status of all lb linked to this controlled fgt
     fgt_co_status = crds.get_cluster_custom_object_status(DOMAIN, "v1", "fortigates", os.getenv('FGT_NAME'))
     LBS_INERROR = 0  # must assigned here so not local to func
@@ -163,15 +164,16 @@ def initialize_fortigate(fgt_co):
     crtled_fgt_co = fgt_co_status
 
 
-def initialize_lb_for_service(lb_fgt, extport):
+def initialize_lb_for_service(lb_fgt, extport,service):
     # port to listen on
     # app-label must be json with the changes to make
     # check the crd is there and good
     metadata = lb_fgt['metadata']
     print("adding service :%s" % metadata['name'])
-    if metadata['name'] not in list_of_applications:
-        list_of_applications.append(metadata['name'])
-        pprint(list_of_applications)
+    if metadata['name'] not in [x['name'] for x in SERVICES_LIST]:
+        pprint(metadata)
+        SERVICES_LIST.append({ "name": metadata['name'], "namespace": metadata['namespace'], "vlb-id": 0 })
+
     # create fgt loadbalancer name k8_≤app-name> http only for now (will be in CRD or annotations)
     data = {
         "type": "server-load-balance",
@@ -209,7 +211,8 @@ def initialize_lb_for_service(lb_fgt, extport):
             'srcaddr': [{"name": "all"}], 'schedule': "always", 'service': [{"name": "HTTP"}], 'logtraffic': "all",
             'inspection-mode': "proxy", "name": "K8S_" + metadata['namespace'] + ":" + metadata['name'],
             "policyid": "8" + extport, "extport": extport,
-            'dstaddr': [{"name": "K8S_" + metadata['namespace'] + ":" + metadata['name']}]}
+            'dstaddr': [{"name": "K8S_" + metadata['namespace'] + ":" + metadata['name']}],
+            "utm-status": "enable"}
     # convention policyId is 8 (K8S) concat with the port number which must be unique per FGT
     ##TODO be carefull with hardcoded policyid
     if UPDATED == 0:
@@ -220,9 +223,15 @@ def initialize_lb_for_service(lb_fgt, extport):
             UPDATED = 1
     lb_fgt_co['spec']['fgt-port'] = extport
     lb_fgt_co['spec']['fgt'] = os.getenv('FGT_NAME')
+    print("##  UPDATE LABEL for lb-fgt ")
+    try:
+        lb_fgt_co['labels'].update({"app": metadata['name']})
+    except KeyError:
+        #This means labels is empty so we can fill it
+        lb_fgt_co['labels']={"app": metadata['name']}
     lb_fgt_co_status = crds.replace_namespaced_custom_object(LBDOMAIN, "v1", metadata['namespace'],
                                                              "lb-fgts", metadata['name'], lb_fgt_co)
-    pprint(lb_fgt_co_status)
+#    pprint(lb_fgt_co_status)
     if UPDATED == 0:
         lb_fgt_co_status['status'] = {'status': "configured"}
     else:
@@ -230,14 +239,15 @@ def initialize_lb_for_service(lb_fgt, extport):
     # TODO update the service itself in K8S
     crds.replace_namespaced_custom_object_status(LBDOMAIN, "v1", metadata['namespace'], "lb-fgts", metadata['name'],
                                                  lb_fgt_co_status)
+    print("### replace SERVICE : %s For this LB"%service.metadata.name)
+    #Clash with the Azure controller
+    service.spec.load_balancer_ip=fgt_co['spec']['fgt-publicip']
 
-
-def fgt_logcheck():
-    try:
-        ret = fgt.get('firewall', 'vip', vdom=vdom)  # TODO get vdom from CRD
-    except e:
-        pass
-
+    service_forstatus=v1.replace_namespaced_service(service.metadata.name,service.metadata.namespace,service)
+    pprint(service_forstatus )
+    service_forstatus.status.load_balancer.ingress[0]=({ "ip": fgt_co['spec']['fgt-publicip']
+        ,"port": extport, "name": "FGT "+os.getenv("FGT_NAME") })
+    v1.replace_namespaced_service_status(service.metadata.name,service.metadata.namespace,service_forstatus)
 
 def update_status_noservice():
     return 'TODO'
@@ -256,10 +266,10 @@ def update_lb_for_service(operation, object):
     # check the crd is there and good
     if operation == "ADDED" or operation == "MODIFIED":
         metadata = object.metadata
-        print("adding service :%s" % metadata.name)
-        pprint(object)
-        if metadata.name not in list_of_applications:
-            list_of_applications.append(metadata.name)
+        print("updating service :%s" % metadata.name)
+        if metadata.name not in [x['name'] for x in SERVICES_LIST]:
+            SERVICES_LIST.append({ "name": metadata.name, "namespace": metadata.namespace, "vlb_id": -1})
+            pprint(SERVICES_LIST)
         # create fgt loadbalancer name k8_≤app-name> http only for now (will be in CRD or annotations)
         data = {
             "type": "server-load-balance",
@@ -274,6 +284,7 @@ def update_lb_for_service(operation, object):
         print("label of obj: %s" % metadata.labels)
         for endpoint in v1.list_namespaced_endpoints(metadata.namespace, label_selector="app=" + metadata.name).items:
             print("### ENDPOINT ###")
+            pprint(endpoint)
             realserver_id = 1
             realservers = []
             for subset in endpoint.subsets:
@@ -333,14 +344,21 @@ def update_fgt(operation, obj, crd):
 #
 #     print("Updating: %s" % name)
 #     crds.replace_namespaced_custom_object(DOMAIN, "v1", namespace, "fortigates", name, obj)
-def delete_lb_co(obj):
+def delete_lb_onfgt(obj):
+    # delete the service on the fortigate but keep the custom object intact to hold customizations
     # First delete the policy on FGT
     POLID = "8" + str(obj['spec']['fgt-port'])
     ret = fgt.delete('firewall', "policy", vdom=VDOM, mkey=POLID)
     print("## DELETE POLICY ##")
     pprint(ret)
-    ##TODO remove vip on FGT change status info on lb-fgt custom object(function ?)
-
+    metadata = object.metadata
+    app_name = object.metadata.labels['app']
+    if app_name:
+        data["name"] = "K8S_" + metadata.namespace + ":" + app_name
+    try:
+        ret = fgt.delete('firewall', 'vip', vdom="root", mkey=data["name"])
+    except:
+        print("Can not delete %s VIP infos" % data["name"])
 
 def update_endp_for_service(object):
     metadata = object.metadata
@@ -443,7 +461,7 @@ if __name__ == "__main__":
                 crds.create_namespaced_custom_object(LBDOMAIN, "v1", metadata.namespace, "lb-fgts", body)
                 lb_fgt_co = crds.get_namespaced_custom_object(LBDOMAIN, "v1", metadata.namespace, "lb-fgts",
                                                               metadata.name)
-            initialize_lb_for_service(lb_fgt_co, metadata.annotations["lb-fgts.fortigates.fortinet.com/port"])
+            initialize_lb_for_service(lb_fgt_co, metadata.annotations["lb-fgts.fortigates.fortinet.com/port"],service)
             # set the resource pointer to the current version
     LB_FGTS_RESOURCES_VERSION = crds.list_cluster_custom_object(LBDOMAIN, "v1", "lb-fgts")['metadata'][
         'resourceVersion']
@@ -459,7 +477,7 @@ if __name__ == "__main__":
 
 while True:
     ##update LB and FGT status if can get LB monitoring infos
-    monitor_lb_co_status()
+    monitor_lb_customobjects_status()
     ## Watch and react to change on loadbalancerfortigate CRD (= changes to LB configs)
     stream = watch.Watch().stream(crds.list_cluster_custom_object, LBDOMAIN, "v1", "lb-fgts",
                                   resource_version=LB_FGTS_RESOURCES_VERSION, timeout_seconds=timeout)
@@ -531,13 +549,13 @@ while True:
             endpoints_resource_version = v1.list_endpoints_for_all_namespaces().metadata.resource_version
             # just adding a lb-fgt def do nothing you must have a service set up with annotations
         if object.metadata.namespace != "kube-system" and object.metadata.labels:
-            print("in endp handler with list app %s" % list_of_applications)
+            print("in endp handler with list app %s" % SERVICES_LIST)
             pprint(object.metadata.labels)
-            if object.metadata.labels['app'] in list_of_applications:
+            if object.metadata.labels['app'] in [x['name'] for x in SERVICES_LIST]:
                 if operation != "ERROR":
                     update_endp_for_service(object)
                     # force monitor check to reflect faster the changes
-                    monitor_lb_co_status()
+                    monitor_lb_customobjects_status()
                 print("Endp event: %s %s / %s" % (event['type'], object.metadata.name, object.metadata.namespace))
         ## should get the max # in the list dict and +1 len of dict can result in colisions
         # for finding the id in realserver struct
