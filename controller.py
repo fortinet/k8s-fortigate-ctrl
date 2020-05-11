@@ -57,57 +57,77 @@ SERVICES_RESOURCE_VERSION = 0
 LB_FGTS_RESOURCES_VERSION = 0
 VDOM = "root"
 
-def update_lb_status(lb_customobject):
-    pass
-################################
-def monitor_lb_customobjects_status():
-    ## use get monitor to update the status of all lb linked to this controlled fgt
-    fgt_co_status = crds.get_cluster_custom_object_status(DOMAIN, "v1", "fortigates", os.getenv('FGT_NAME'))
-    LBS_INERROR = 0  # must assigned here so not local to func
+
+def update_fgt_status(fgt_name, status):
+    ##to be called if fgt. operation fails
+    ##return the value of the object after replace
+    fgt_co_status = crds.get_cluster_custom_object_status(DOMAIN, "v1", "fortigates", fgt_name)
+    fgt_co_status['status'] = {'status': status}
+    return (crds.replace_cluster_custom_object_status(DOMAIN, "v1", "fortigates", fgt_name,fgt_co_status))
+
+
+def get_vlb_id(service):
     try:
         monitored_lbs = fgt.monitor('firewall', 'load-balance',
-                                    mkey='select', vdom='root', parameters='count=999')
-        # might use api/v2/monitor/firewall/load-balance?start=5&count=1 to target only configured ones
-    except:
-        # if pb this means we can not connect to FGT
-        # update status
-        # get the new version of the object before changing status (or err)
+                                    mkey='select', vdom='root', parameters='count=1999')
         if monitored_lbs['status'] == 'success':
-            fgt_co_status['status'] = {'status': "connected"}
-            LBS_INERROR = 0
+            update_fgt_status(os.getenv("FGT_NAME"), "connected")
         else:
-            fgt_co_status['status'] = {'status': "error"}
-            LBS_INERROR = 1
-        crds.replace_cluster_custom_object_status(DOMAIN, "v1", "fortigates", os.getenv('FGT_NAME'), fgt_co_status)
-        # make the list/specs available globally
-    for lb_co in crds.list_cluster_custom_object(LBDOMAIN, "v1", "lb-fgts")['items']:
-        # must check on every lbs linked to this fgt or leave them
-        fgt_lb_results = monitored_lbs['results']
+            update_fgt_status(os.getenv("FGT_NAME"), "connection error")
+    except:
+        update_fgt_status(os.getenv("FGT_NAME"), "connection error")
+    VLB_ID=0
+    for vlb in monitored_lbs.results:
+        if vlb['virtual_server_name'] == "K8S_" + service['namespace'] + ":" + service['name']:
+            break
+        else:
+            VLB_ID += 1
+    return (VLB_ID)
+
+def update_lbs_status():
+    #update the status of LB custom objects based on the SERVICES_LIST
+    print(" # services list: %s " % SERVICES_LIST)
+    for SERVICE in SERVICES_LIST:
+        lb_co = crds.get_namespaced_custom_object(LBDOMAIN, "v1", SERVICE['namespace'], "lb-fgts", SERVICE['name'])
         metadata = lb_co['metadata']
-        if lb_co['spec']['fgt'] == os.getenv('FGT_NAME'):
-            print("HAndling: % s" % lb_co['metadata']['name'])
-            if LBS_INERROR == 0:
-                for vlb in fgt_lb_results:
-                    if vlb['virtual_server_name'] == "K8S_" + metadata['namespace'] + ":" + metadata['name']:
-                        realserver_number = len(vlb['list'])
-                        realserver_ups = 0
-                        for realserv in vlb['list']:
-                            if realserv['status'] == "up":
-                                realserver_ups += 1
-                        # update status with #servup/#servconf
-                        lb_co['status']['status'] = str(realserver_ups) + "/" + str(realserver_number)
-                        print("in good update status %s %s" % (vlb['virtual_server_name'], lb_co['status']['status']))
-            else:
-                # this means fgt is not reachable
-                try:
-                    lb_co['status']['status'] = "error"
-                except KeyError:
-                    # if Keyerror then status is empty
-                    lb_co['status'] = {'status': "error"}
-            ##TODO update the LB custom objects status not managed (not in monitor)
-            crds.replace_namespaced_custom_object_status(LBDOMAIN, "v1", metadata['namespace'], "lb-fgts",
-                                                         metadata['name'],
+        # UPDATE the vlb-id if negative
+        if SERVICE['vlb-id'] < 0:
+            SERVICES_LIST.pop() # remove the service definition from list
+            SERVICE['vlb-id'] = get_vlb_id(SERVICE)
+            SERVICES_LIST.append({ "name": SERVICE['name'], "namespace": SERVICE['namespace'], "vlb-id": SERVICE['vlb-id']})
+
+        try:
+            vlb_mon = fgt.monitor('firewall', 'load-balance', mkey='select',
+                                  vdom='root',
+                                  parameters='start='+str(SERVICE['vlb-id'])+"&count=1")
+            # Fortigate API forces to use start and count (no search here)
+            #we do a a get per service configured to avoid large checks
+            vlb=vlb_mon['results'][0] ##we made sure to have 1 result only no need to parse
+            if vlb_mon['status'] == 'success':
+                if vlb['virtual_server_name'] == "K8S_" + SERVICE['namespace'] + ":" + SERVICE['name']:
+                    realserver_number = len(vlb['list'])
+                    realserver_ups = 0
+                    for realserv in vlb['list']:
+                        if realserv['status'] == "up":
+                            realserver_ups += 1
+                    # update status with #servup/#servconf
+                    lb_co['status']['status'] = str(realserver_ups) + "/" + str(realserver_number)
+                    print("in new good update status %s %s" % (vlb['virtual_server_name'], lb_co['status']['status']))
+                else:
+                    ## no reason to reach that point
+                    raise ("error in matching vlb_id")
+        except:
+            lb_co['status']['status'] = "error getting fgt infos"
+            update_fgt_status(os.getenv("FGT_NAME"),"error")
+        #    print("issue getting info from FGT")
+        finally:
+            crds.replace_namespaced_custom_object_status(LBDOMAIN, "v1", SERVICE['namespace'], "lb-fgts",
+                                                         SERVICE['name'],
                                                          lb_co)
+
+
+################################
+
 
 
 def initialize_fortigate(fgt_co):
@@ -295,6 +315,8 @@ def update_lb_for_service(operation, object):
                             {"id": realserver_id, "ip": address.ip, "port": port.port, "status": "active"})
                         realserver_id += 1
         data["realservers"] = realservers
+        print("*** realservers in update")
+        pprint(realservers)
         ## TODO find vdom, wanport and lanport in crd
         ret = fgt.set('firewall', 'vip', vdom="root", data=data)
         pprint(ret)
@@ -321,15 +343,7 @@ def update_lb_for_service(operation, object):
         pprint(ret2)
 
 
-def update_fgt(operation, obj, crd):
-    ##OPERATION: enum { ADDED, DELETED; MODIFIED }
-    # DELETE must also delete all related load-balancers (warning service with annotations ! try to fail them)
-    # ADDED should create if not existing and login works.
-    # UPDATE the FGT config vs. the crd and report in crd
 
-    print("### update FGT oper: %s ###" % operation)
-    pprint(obj)
-    pprint(crd)
 
 
 # def review_fortigate(crds, obj):
@@ -477,7 +491,7 @@ if __name__ == "__main__":
 
 while True:
     ##update LB and FGT status if can get LB monitoring infos
-    monitor_lb_customobjects_status()
+    update_lbs_status()
     ## Watch and react to change on loadbalancerfortigate CRD (= changes to LB configs)
     stream = watch.Watch().stream(crds.list_cluster_custom_object, LBDOMAIN, "v1", "lb-fgts",
                                   resource_version=LB_FGTS_RESOURCES_VERSION, timeout_seconds=timeout)
@@ -555,7 +569,7 @@ while True:
                 if operation != "ERROR":
                     update_endp_for_service(object)
                     # force monitor check to reflect faster the changes
-                    monitor_lb_customobjects_status()
+                    update_lbs_status()
                 print("Endp event: %s %s / %s" % (event['type'], object.metadata.name, object.metadata.namespace))
         ## should get the max # in the list dict and +1 len of dict can result in colisions
         # for finding the id in realserver struct
