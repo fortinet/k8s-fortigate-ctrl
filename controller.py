@@ -395,7 +395,8 @@ def delete_lb_onfgt(obj):
     for SERVICE in SERVICES_LIST:
         if SERVICE['name'] == metadata.name and SERVICE['namespace'] == metadata.namespace:
             # Remove the service line from the list
-            SERVICES_LIST.pop()
+            with lock:
+                SERVICES_LIST.pop()
 
 def update_endp_for_service(object):
     metadata = object.metadata
