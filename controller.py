@@ -17,7 +17,8 @@ K8S controller to have a load balancer on a fortigate
  use and manipulate CRD for fortigates load balancer fortigates.
  Use 1 controller per Fortigate the controller can create multiple LB per FGT.
 """
-
+import threading
+import time
 import os
 import signal
 import sys
@@ -31,6 +32,8 @@ from fortiosapi import FortiOSAPI
 #Disable ssl verification warnings (be responsible)
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+lock=threading.RLock()
 
 def signal_handler(sig, frame):
     # catch the stop condition to release the fgt session
@@ -96,9 +99,10 @@ def update_lbs_status():
         metadata = lb_co['metadata']
         # UPDATE the vlb-id if negative
         if SERVICE['vlb-id'] < 0:
-            SERVICES_LIST.pop() # remove the service definition from list
-            SERVICE['vlb-id'] = get_vlb_id(SERVICE)
-            SERVICES_LIST.append({ "name": SERVICE['name'], "namespace": SERVICE['namespace'], "vlb-id": SERVICE['vlb-id']})
+            with lock:
+                SERVICES_LIST.pop() # remove the service definition from list
+                SERVICE['vlb-id'] = get_vlb_id(SERVICE)
+                SERVICES_LIST.append({ "name": SERVICE['name'], "namespace": SERVICE['namespace'], "vlb-id": SERVICE['vlb-id']})
 
         try:
             vlb_mon = fgt.monitor('firewall', 'load-balance', mkey='select',
@@ -123,9 +127,10 @@ def update_lbs_status():
                     print("in new good update status %s %s" % (vlb['virtual_server_name'], lb_co['status']['status']))
                 else:
                     #vlb-id mismatch recheck
-                    SERVICES_LIST.pop()  # remove the service definition from list
-                    SERVICE['vlb-id'] = get_vlb_id(SERVICE)
-                    SERVICES_LIST.append({"name": SERVICE['name'], "namespace": SERVICE['namespace'], "vlb-id": SERVICE['vlb-id']})
+                    with lock:
+                        SERVICES_LIST.pop()  # remove the service definition from list
+                        SERVICE['vlb-id'] = get_vlb_id(SERVICE)
+                        SERVICES_LIST.append({"name": SERVICE['name'], "namespace": SERVICE['namespace'], "vlb-id": SERVICE['vlb-id']})
         except:
             lb_co['status']['status'] = "error getting fgt infos"
             update_fgt_status(os.getenv("FGT_NAME"),"error")
@@ -386,6 +391,7 @@ def delete_lb_onfgt(obj):
                          mkey="K8S_" + metadata.namespace + ":" + app_name)
     except FortiOSAPI:
         print("Can not delete %s VIP infos" % data["name"])
+    #to do update lb custom object status
     for SERVICE in SERVICES_LIST:
         if SERVICE['name'] == metadata.name and SERVICE['namespace'] == metadata.namespace:
             # Remove the service line from the list
@@ -427,7 +433,11 @@ def update_endp_for_service(object):
         else:
             # TODO change the status to error
             return False
-
+def monitor_loop():
+    while True:
+        if len(SERVICES_LIST) > 0:
+            update_lbs_status()
+        time.sleep(3)
 
 if __name__ == "__main__":
 
@@ -504,10 +514,12 @@ if __name__ == "__main__":
     count = 15
     print("")
     print('_____________________________')
+    t = threading.Thread(target=monitor_loop)
+    t.start()
 
 while True:
     ##update LB and FGT status if can get LB monitoring infos
-    update_lbs_status()
+#    update_lbs_status()
     ## Watch and react to change on loadbalancerfortigate CRD (= changes to LB configs)
     stream = watch.Watch().stream(crds.list_cluster_custom_object, LBDOMAIN, "v1", "lb-fgts",
                                   resource_version=LB_FGTS_RESOURCES_VERSION, timeout_seconds=timeout)
