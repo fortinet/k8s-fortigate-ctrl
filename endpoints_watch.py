@@ -24,6 +24,7 @@ import json
 import os
 from pprint import pprint
 
+
 def main():
     # Configs can be set in Configuration class directly or using helper
     # utility. If no argument provided, the config will be loaded from
@@ -37,9 +38,10 @@ def main():
     endpoints = v1.list_endpoints_for_all_namespaces(watch=False)
     endp_resversion = endpoints.metadata.resource_version
     print (endp_resversion)
-    for event in w.stream(v1.list_endpoints_for_all_namespaces,  field_selector="metadata.namespace!=kube-system", resource_version=endp_resversion,timeout_seconds=10, pretty='true'):
+    for event in w.stream(v1.list_endpoints_for_all_namespaces,  field_selector="metadata.namespace!=kube-system", resource_version=endp_resversion, timeout_seconds=10, pretty='true'):
         pprint(event)
-        print("Event: %s %s %s" % (event['type'], event['object'].metadata.name, event['object'].metadata.annotations ))
+        print("Event: %s %s %s" % (
+            event['type'], event['object'].metadata.name, event['object'].metadata.annotations))
         count -= 1
         if not count:
             w.stop()
