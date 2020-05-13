@@ -29,8 +29,11 @@ from kubernetes import client, config, watch
 
 from pprint import pprint
 from fortiosapi import FortiOSAPI
+from fortiosapi import InvalidLicense, NotLogged
 # Disable ssl verification warnings (be responsible)
 import urllib3
+from kubernetes.client.rest import ApiException
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 lock = threading.RLock()
@@ -40,6 +43,7 @@ def signal_handler(sig, frame):
     # catch the stop condition to release the fgt session
     print('You pressed Ctrl+C! disconnecting firewall before exit')
     fgt.logout()
+    t.join()
     sys.exit(3)
 
 
@@ -82,7 +86,7 @@ def get_vlb_id(service):
             update_fgt_status(os.getenv("FGT_NAME"), "connected")
         else:
             update_fgt_status(os.getenv("FGT_NAME"), "connection error")
-    except:
+    except NotLogged:
         update_fgt_status(os.getenv("FGT_NAME"), "connection error")
     VLB_ID = 0
     pprint(monitored_lbs)
@@ -110,7 +114,8 @@ def update_lbs_status():
                     {"name": SERVICE['name'], "namespace": SERVICE['namespace'], "vlb-id": SERVICE['vlb-id']})
 
         try:
-            vlb_mon = fgt.monitor('firewall', 'load-balance', mkey='select',
+            with lock:
+                vlb_mon = fgt.monitor('firewall', 'load-balance', mkey='select',
                                   vdom='root',
                                   parameters='start='+str(SERVICE['vlb-id'])+"&count=1")
             # Fortigate API forces to use start and count (no search here)
@@ -121,6 +126,9 @@ def update_lbs_status():
             except IndexError:
                 # might happen when deleting service and not yet changed the custom objects
                 return True
+            except (NotLogged, InvalidLicense):
+                print(" Error getting the info on the right vlb-id")
+                return False
             if vlb_mon['status'] == 'success':
                 if vlb['virtual_server_name'] == "K8S_" + SERVICE['namespace'] + ":" + SERVICE['name']:
                     realserver_number = len(vlb['list'])
@@ -140,15 +148,19 @@ def update_lbs_status():
                         SERVICE['vlb-id'] = get_vlb_id(SERVICE)
                         SERVICES_LIST.append(
                             {"name": SERVICE['name'], "namespace": SERVICE['namespace'], "vlb-id": SERVICE['vlb-id']})
-        except:
+        except (NotLogged,InvalidLicense):
             lb_co['status']['status'] = "error getting fgt infos"
             update_fgt_status(os.getenv("FGT_NAME"), "error")
-            print("issue getting info from FGT")
+            print("ERROR getting info from FGT")
         finally:
-            crds.replace_namespaced_custom_object_status(LBDOMAIN, "v1", SERVICE['namespace'], "lb-fgts",
+            try:
+                with lock:
+                    crds.replace_namespaced_custom_object_status(LBDOMAIN, "v1", SERVICE['namespace'], "lb-fgts",
                                                          SERVICE['name'],
                                                          lb_co)
-
+            except ApiException as e:
+                print("ERROR on update_status %s"%e)
+                pass
 
 ################################
 
@@ -182,7 +194,7 @@ def initialize_fortigate(fgt_co):
     LOGINERR = 0
     try:
         fgt.login(FGT_IP, FGT_USER, password=FGT_PASSWD, verify=False)
-    except:
+    except NotLogged:
         LOGINERR = 1
 
     try:
@@ -190,9 +202,11 @@ def initialize_fortigate(fgt_co):
     except KeyError:
         print("could not find the FGT public-ip which might be linked to license issue")
         pass
-    except:
+    except (NotLogged, InvalidLicense):
         print("ERROR trying to check license")
         pass
+#    fgt_co_upd= crds.get_namespaced_custom_object(DOMAIN, "v1", "fortigates", name)
+#    # get an update view of the
     fgt_co_status = crds.replace_cluster_custom_object(
         DOMAIN, "v1", "fortigates", name, fgt_co)
     # get the new version of the object before changing status (or err)
@@ -222,13 +236,22 @@ def initialize_lb_for_service(lb_fgt, extport, service):
 
     # create fgt loadbalancer name k8_≤app-name> http only for now (will be in CRD or annotations)
     data = {
+        "name": "K8S_" + metadata['namespace']+ ":" + metadata['name'],
+        "type": "http",
+        "interval": "5",
+         "port": "80",
+    }
+    # TODO get the port from endpoints def
+    ret = fgt.set('firewall', 'ldb-monitor', vdom="root", data=data)
+
+    data = {
         "type": "server-load-balance",
         "ldb-method": "round-robin",
         "extintf": "port1",
         "server-type": "http",
-        # TODO add monitor "monitor": [{"name": "http"}], so that RTT works be par of crd
+        "monitor": [{"name": "K8S_" +  metadata['namespace']+ ":" + metadata['name']}],
     }
-    data["name"] = "K8S_" + metadata['namespace'] + ":" + metadata['name']
+    data["name"] = "K8S_" +  metadata['namespace']+ ":" + metadata['name']
     data["extport"] = extport
     print("label of obj: %s" % metadata)
     # Just ignore endpoints here as they will be handled separately
@@ -238,7 +261,7 @@ def initialize_lb_for_service(lb_fgt, extport, service):
         ret = fgt.set('firewall', 'vip', vdom="root", data=data)
         if ret['status'] != 'success':
             UPDATED = 1
-    except:
+    except (NotLogged, InvalidLicense):
         UPDATED = 1
     # create the policy to allow getting in
     # TODO check if id is available or find another one create the virtual server LB policy (need its id)
@@ -265,14 +288,16 @@ def initialize_lb_for_service(lb_fgt, extport, service):
     except KeyError:
         # This means labels is empty so we can fill it
         lb_fgt_co['labels'] = {"app": metadata['name']}
-    lb_fgt_co_status = crds.replace_namespaced_custom_object(LBDOMAIN, "v1", metadata['namespace'],
+    with lock:
+        lb_fgt_co_status = crds.replace_namespaced_custom_object(LBDOMAIN, "v1", metadata['namespace'],
                                                              "lb-fgts", metadata['name'], lb_fgt_co)
 #    pprint(lb_fgt_co_status)
     if UPDATED == 0:
         lb_fgt_co_status['status'] = {'status': "configured"}
     else:
         lb_fgt_co_status['status'] = {'status': "error"}
-    crds.replace_namespaced_custom_object_status(LBDOMAIN, "v1", metadata['namespace'], "lb-fgts", metadata['name'],
+    with lock:
+        crds.replace_namespaced_custom_object_status(LBDOMAIN, "v1", metadata['namespace'], "lb-fgts", metadata['name'],
                                                  lb_fgt_co_status)
     print("### replace SERVICE : %s For this LB" % service.metadata.name)
     # Clash with the Azure controller
@@ -283,9 +308,9 @@ def initialize_lb_for_service(lb_fgt, extport, service):
     pprint(service_forstatus)
     service_forstatus.status.load_balancer.ingress = [
         {"ip": fgt_co['spec']['fgt-publicip'], "port": extport, "name": "FGT "+os.getenv("FGT_NAME")}]
-
-    v1.replace_namespaced_service_status(
-        service.metadata.name, service.metadata.namespace, service_forstatus)
+    with lock:
+        v1.replace_namespaced_service_status(
+            service.metadata.name, service.metadata.namespace, service_forstatus)
 
 
 def update_status_noservice():
@@ -297,66 +322,6 @@ def update_status_noservice():
     #     # if Keyerror then status is empty
     #     lb_co['status'] = {'status': "no_service"}
 
-
-def set_lb_for_service(object):
-    # port to listen on
-    # check the crd is there and good
-    metadata = object.metadata
-    print("updating service :%s" % metadata.name)
-    if metadata.name not in [x['name'] for x in SERVICES_LIST]:
-        SERVICES_LIST.append(
-            {"name": metadata.name, "namespace": metadata.namespace, "vlb_id": -1})
-        # vlb_id is unknown befaore creating it on FGT
-        pprint(SERVICES_LIST)
-    # create fgt loadbalancer name k8_≤app-name> http only for now (will be in CRD or annotations)
-    data = {
-        "type": "server-load-balance",
-        "ldb-method": "round-robin",
-        "extintf": "port1",
-        "server-type": "http",
-        # TODO add monitor            "monitor": [{"name": "http"}],
-    }
-    data["name"] = "K8S_" + metadata.namespace + ":" + metadata.name
-    annotations = json.loads(
-        object.metadata.annotations['kubectl.kubernetes.io/last-applied-configuration'])
-    data["extport"] = annotations['metadata']['annotations']["lb-fgts.fortigates.fortinet.com/port"]
-    print("label of obj: %s" % metadata.labels)
-    for endpoint in v1.list_namespaced_endpoints(metadata.namespace, label_selector="app=" + metadata.name).items:
-        print("### ENDPOINT ###")
-        pprint(endpoint)
-        realservers = []
-        for subset in endpoint.subsets:
-            for address in subset.addresses:
-                for port in subset.ports:
-                    realservers.append(
-                        {"ip": address.ip, "port": port.port, "status": "active"})
-    data["realservers"] = realservers
-    print("*** realservers in update")
-    pprint(realservers)
-    # TODO find vdom, wanport and lanport in crd
-    ret = fgt.set('firewall', 'vip', vdom="root", data=data)
-    # create the policy to allow getting in
-    # TODO check if id is available or find another one create the virtual server LB policy (need its id)
-    ## fgt.get('firewall', 'policy', vdom="root", mkey=403)
-    data = {
-        'action': "accept",
-        'srcintf': [{"name": "port1"}],
-        'dstintf': [{"name": "port2"}],
-        'srcaddr': [{"name": "all"}],
-        'schedule': "always",
-        'service': [{"name": "HTTP"}],
-        'logtraffic': "all",
-        'inspection-mode': "proxy"
-    }
-    data["name"] = "K8S_" + metadata.namespace + ":" + metadata.name
-    data["policyid"] = "8" + \
-        annotations['metadata']['annotations']["lb-fgts.fortigates.fortinet.com/port"]
-    # TODO be carefull with hardcoded policyid
-    data["extport"] = annotations['metadata']['annotations']["lb-fgts.fortigates.fortinet.com/port"]
-    data['dstaddr'] = [
-        {"name": "K8S_" + metadata.namespace + ":" + metadata.name}]
-
-    ret2 = fgt.set('firewall', 'policy', vdom="root", data=data)
 
 
 def set_fortigate(obj):
@@ -429,7 +394,7 @@ def update_endp_for_service(object):
         data["name"] = "K8S_" + metadata.namespace + ":" + app_name
     try:
         ret = fgt.get('firewall', 'vip', vdom="root", mkey=data["name"])
-    except:
+    except (NotLogged, InvalidLicense):
         print("Can not get %s VIP infos" % data["name"])
     print("---------  Update endps")
     if ret['status'] == 'success':
@@ -451,7 +416,7 @@ def update_endp_for_service(object):
                           mkey=data["name"], data=data)
             if ret['status'] != 'success':
                 UPDATED = 1
-        except:
+        except (NotLogged, InvalidLicense):
             UPDATED = 1
         if UPDATED == 0:
             return True
@@ -510,7 +475,9 @@ if __name__ == "__main__":
         crds.create_cluster_custom_object(DOMAIN, "v1", "fortigates", body)
         fgt_co = crds.get_cluster_custom_object(
             DOMAIN, "v1", "fortigates", os.getenv('FGT_NAME'))
-    initialize_fortigate(fgt_co)
+    # Must lock to avoid race condition on object states
+    with lock:
+        initialize_fortigate(fgt_co)
     FGTS_RESOURCE_VERSION = fgt_co['metadata']['resourceVersion']
     LBDOMAIN = "fortigates.fortinet.com"
     # Look for annotations in services and update/create lb-fgt custom objets if needed
@@ -524,7 +491,7 @@ if __name__ == "__main__":
             try:
                 lb_fgt_co = crds.get_namespaced_custom_object(LBDOMAIN, "v1", metadata.namespace, "lb-fgts",
                                                               metadata.name)
-            except:
+            except ApiException:
                 print("CREATE a NEW LB-FGT object")
                 # if no previous custom object  then create a generic
                 body = {"apiVersion": "fortigates.fortinet.com/v1", "kind": "LoadBalancer",
@@ -688,7 +655,7 @@ while True:
                 try:
                     lb_fgt_co = crds.get_namespaced_custom_object(LBDOMAIN, "v1", metadata.namespace, "lb-fgts",
                                                                   metadata.name)
-                except:
+                except ApiException:
                     print("CREATE a NEW LB-FGT object")
                     # if no previous custom object  then create a generic
                     body = {"apiVersion": "fortigates.fortinet.com/v1", "kind": "LoadBalancer",

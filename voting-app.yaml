@@ -43,7 +43,7 @@ kind: Deployment
 metadata:
   name: azure-vote2-front
 spec:
-  replicas: 5
+  replicas: 2
   selector:
     matchLabels:
       app: azure-vote2-front
@@ -107,7 +107,7 @@ metadata:
   name: azure-vote2-front-hpa
 spec:
   maxReplicas: 40
-  minReplicas: 2
+  minReplicas: 1
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
