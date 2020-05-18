@@ -1,4 +1,5 @@
-# k8s-ctrl-fortigate
+# k8s-fortigate-ctrl
+
 K8S controller for fortigate in python
 THIS IS ALPHA DEMO CODE ! 
 no support, no help for now you have been warned 
@@ -24,6 +25,8 @@ metadata:
     app: azure-vote2-front
   annotations:
     lb-fgts.fortigates.fortinet.com/port: "90"
+    service.beta.kubernetes.io/azure-load-balancer-internal: "true"
+    fortigates.fortinet.com/name: "fgt-az1"
 spec:
   type: LoadBalancer
   # may try nodeport type to see if works better for K8S connector
