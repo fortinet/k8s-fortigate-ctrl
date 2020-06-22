@@ -5,7 +5,7 @@ metadata:
 spec:
   fgt: fgt-az
   fgt-port: 80
-
+  type: https
 #will use controller-image: param modified by the controller use as name if not set by CRD
 # modify with controller
 #  state: "up"

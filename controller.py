@@ -102,10 +102,15 @@ def update_lbs_status():
     # update the status of LB custom objects based on the SERVICES_LIST
     print(" # Update status for : %s " % SERVICES_LIST)
     for SERVICE in SERVICES_LIST:
-        lb_co = crds.get_namespaced_custom_object(
+        lb_co = crds.get_namespaced_custom_object_status(
             LBDOMAIN, "v1", SERVICE['namespace'], "lb-fgts", SERVICE['name'])
         metadata = lb_co['metadata']
-        lb_co_beforechk_status = lb_co['status']['status']
+        try:
+            lb_co_beforechk_status = lb_co['status']['status']
+        except KeyError:
+            # if key error means no status was ever set
+            lb_co_beforechk_status = "not configured"
+            lb_co['status']= { 'status': "not configured" }
         # TODO check for status configured in spec or error might recheck in the garbage collect?
         # UPDATE the vlb-id if negative
         if SERVICE['vlb-id'] < 0:
@@ -503,7 +508,7 @@ if __name__ == "__main__":
         print("CREATE a NEW FGT object")
         # if no previous custom object  then create a generic
         body = {"apiVersion": "fortinet.com/v1", "kind": "Fortigate",
-                "spec": {"vdom": "root"}, "scope": "Cluster", "wanintf": "port1"}
+                "spec": {"vdom": "root" , "wanintf": "port1", "lanintf": "port2"}, "scope": "Cluster"}
         body['metadata'] = {"name": os.getenv('FGT_NAME')}
         # TODO refactor this is redondant
         body['spec']['fgt-name'] = os.getenv('FGT_NAME')
@@ -519,27 +524,31 @@ if __name__ == "__main__":
     SERVICES_RESOURCE_VERSION = v1.list_service_for_all_namespaces(
         label_selector="app").metadata.resource_version
     for service in v1.list_service_for_all_namespaces(label_selector="app").items:
-        if "lb-fgts.fortigates.fortinet.com/port" in service.metadata.annotations:
-            # if this annotation is on then we create/update a loadbalancer on fortigate
-            # can add "fortigates.fortinet.com/name: myfgt" annotation if multiple FGT
-            metadata = service.metadata
-            try:
-                lbfgt_co = crds.get_namespaced_custom_object(LBDOMAIN, "v1", metadata.namespace, "lb-fgts",
-                                                              metadata.name)
-            except ApiException:
-                print("CREATE a NEW LB-FGT object")
-                # if no previous custom object  then create a generic
-                body = {"apiVersion": "fortigates.fortinet.com/v1", "kind": "LoadBalancer",
-                        "spec": {"fgt-port": "00"}}
-                body['metadata'] = {"name": metadata.name}
-                body['spec']['fgt-name'] = os.getenv('FGT_NAME')
-                crds.create_namespaced_custom_object(
-                    LBDOMAIN, "v1", metadata.namespace, "lb-fgts", body)
-                lbfgt_co = crds.get_namespaced_custom_object(LBDOMAIN, "v1", metadata.namespace, "lb-fgts",
-                                                              metadata.name)
-            set_lb_for_service(
-                lbfgt_co, metadata.annotations["lb-fgts.fortigates.fortinet.com/port"], service)
-            # set the resource pointer to the current version
+        try:
+            if "lb-fgts.fortigates.fortinet.com/port" in service.metadata.annotations:
+                # if this annotation is on then we create/update a loadbalancer on fortigate
+                # can add "fortigates.fortinet.com/name: myfgt" annotation if multiple FGT
+                metadata = service.metadata
+                try:
+                    lbfgt_co = crds.get_namespaced_custom_object(LBDOMAIN, "v1", metadata.namespace, "lb-fgts",
+                                                                  metadata.name)
+                except ApiException:
+                    print("CREATE a NEW LB-FGT object")
+                    # if no previous custom object  then create a generic
+                    body = {"apiVersion": "fortigates.fortinet.com/v1", "kind": "LoadBalancer",
+                            "spec": {"fgt-port": "00"}}
+                    body['metadata'] = {"name": metadata.name}
+                    body['spec']['fgt-name'] = os.getenv('FGT_NAME')
+                    crds.create_namespaced_custom_object(
+                        LBDOMAIN, "v1", metadata.namespace, "lb-fgts", body)
+                    lbfgt_co = crds.get_namespaced_custom_object(LBDOMAIN, "v1", metadata.namespace, "lb-fgts",
+                                                                  metadata.name)
+                set_lb_for_service(
+                    lbfgt_co, metadata.annotations["lb-fgts.fortigates.fortinet.com/port"], service)
+                # set the resource pointer to the current version
+        except TypeError:
+            # means annotations is empty then not for us
+            pass
     LB_FGTS_RESOURCES_VERSION = crds.list_cluster_custom_object(LBDOMAIN, "v1", "lb-fgts")['metadata'][
         'resourceVersion']
 
@@ -555,7 +564,7 @@ if __name__ == "__main__":
     t.start()
 
 while True:
-    #check the monitoring thread is alive:
+    # check the monitoring thread is alive:
     if not t.is_alive():
        # if thread fails just exit K8S will restart
        sys.exit(2)
@@ -628,31 +637,38 @@ while True:
     # ENDPOINTS WATCH
     count = 15
     w = watch.Watch()
+    print("Start endpoints stream at: %s" % endpoints_resource_version)
     # tried with  field_selector="metadata.namespace!=kube-system" but end in error in API
     for event in w.stream(v1.list_endpoints_for_all_namespaces,
                           resource_version=endpoints_resource_version, timeout_seconds=timeout):
         object = event.get("object")
         operation = event['type']
-        if operation == "ERROR":
-            endpoints_resource_version = v1.list_endpoints_for_all_namespaces().metadata.resource_version
-            # just adding a lb-fgt def do nothing you must have a service set up with annotations
         if object.metadata.namespace != "kube-system" and object.metadata.labels:
             print("in endp handler with list app %s" % SERVICES_LIST)
             pprint(object.metadata.labels)
-            if object.metadata.labels['app'] in [x['name'] for x in SERVICES_LIST]:
-                if operation != "ERROR":
-                    print("End points:")
-                    pprint(object.subsets)
-                    print("Updated endpoints: %s" %
-                          update_endp_for_service(object))
-                    # force monitor check to reflect faster the changes
-                    update_lbs_status()
-                print("Endp event: %s %s / %s" %
-                      (event['type'], object.metadata.name, object.metadata.namespace))
+            try:
+                if object.metadata.labels['app'] in [x['name'] for x in SERVICES_LIST]:
+                    if operation != "ERROR":
+                        print("End points:")
+                        pprint(object.subsets)
+                        print("Updated endpoints: %s" %
+                              update_endp_for_service(object))
+                        # force monitor check to reflect faster the changes
+                        update_lbs_status()
+                    print("Endp event: %s %s / %s" %
+                          (event['type'], object.metadata.name, object.metadata.namespace))
+            except KeyError:
+                # case where app is used in a label but not a key in dict (app=..)
+                # not for us
+                pass
         # should get the max # in the list dict and +1 len of dict can result in colisions
         # for finding the id in realserver struct
         # actually the endpoint update object resend the full list of endp so being brutal
-        endpoints_resource_version = object.metadata.resource_version
+        if operation == "ERROR":
+            endpoints_resource_version = v1.list_endpoints_for_all_namespaces().metadata.resource_version
+            # just adding a lb-fgt def do nothing you must have a service set up with annotations
+        else:
+            endpoints_resource_version = object.metadata.resource_version
         count -= 1
         if not count:
             w.stop()
