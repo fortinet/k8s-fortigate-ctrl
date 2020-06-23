@@ -1,32 +1,5 @@
-apiVersion: apiextensions.k8s.io/v1beta1
-kind: CustomResourceDefinition
-metadata:
-  name: fortigates.fortinet.com
-spec:
-  group: fortinet.com
-  versions:
-    - name: v1
-      served: true
-      storage: true
-  scope: Cluster
-  names:
-    plural: fortigates
-    singular: fortigate
-    kind: Fortigate
-    shortNames:
-     - fgt
-  additionalPrinterColumns:
-  - JSONPath: .status.status
-    name: status
-    type: string
-  - JSONPath: .spec.fgt-publicip
-    name: externalip
-    type: string
-  subresources:
-    status: {}
----
 ##Must force to override LoadBalancer type
-##  kubectl apply -f fortigates-crd.yml --force
+##  kubectl apply -f fortigates.fortinet.com.yml --force
 apiVersion: apiextensions.k8s.io/v1beta1
 kind: CustomResourceDefinition
 metadata:

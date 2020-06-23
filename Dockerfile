@@ -7,6 +7,6 @@ ENV FGT_SECRET none
 ENV FGT_URL none
 ##to pass access to FGT as user@X.X.X.X
 ADD controller.py /tmp
-ADD fortigates-crd.yml /tmp
+ADD fortigates.fortinet.com.yml /tmp
 
 ENTRYPOINT  ["python3", "-u", "/tmp/controller.py"]

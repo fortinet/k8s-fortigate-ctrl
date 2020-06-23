@@ -1,9 +1,9 @@
 # k8s-fortigate-ctrl
 
-K8S controller for fortigate in python
+K8S controller for using fortigates as load balancers 
 THIS IS ALPHA DEMO CODE ! 
-no support, no help for now you have been warned 
 It is functionnal.
+Code provided as is (see License) PR are welcome
 
 # Goals
 - use loadbalancer annotation to implement LB in Fortigate
@@ -35,6 +35,8 @@ spec:
   selector:
     app: azure-vote2-front
 ```
+
+# get started
 
 The controller will use or create the necessary custom ressources fortigate and lb-fgts.
 

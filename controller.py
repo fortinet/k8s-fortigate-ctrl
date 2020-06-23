@@ -476,10 +476,10 @@ if __name__ == "__main__":
 
     if 'KUBERNETES_PORT' in os.environ:
         config.load_incluster_config()
-        definition = '/tmp/fortigates-crd.yml'
+        definition = '/tmp/fortigates.fortinet.com.yml'
     else:
         config.load_kube_config()
-        definition = 'fortigates-crd.yml'
+        definition = 'fortigates.fortinet.com.yml'
     configuration = client.Configuration()
     configuration.assert_hostname = False
     api_client = client.api_client.ApiClient(configuration=configuration)
