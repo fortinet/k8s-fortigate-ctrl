@@ -51,3 +51,10 @@ To have a nice monitoring of kubectl states
 ````shell script
 watch -c "kubectl get pods,lb-fgt,svc -o wide|ccze -A"
 ````
+
+# Support
+Fortinet-provided scripts in this and other GitHub projects do not fall under the regular Fortinet technical support scope and are not supported by FortiCare Support Services. For direct issues, please refer to the Issues tab of this GitHub project. For other questions related to this project, contact github@fortinet.com.
+ 
+# License
+[License](LICENSE) © Fortinet Technologies. All rights reserved.
+ 
