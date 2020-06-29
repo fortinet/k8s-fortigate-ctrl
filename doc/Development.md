@@ -18,3 +18,6 @@ you must use :
 For type to be LoadBalancer
 
 ## TTD
+
+# References
+https://medium.com/better-programming/k8s-tips-using-a-serviceaccount-801c433d0023

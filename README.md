@@ -40,6 +40,13 @@ spec:
 
 The controller will use or create the necessary custom ressources fortigate and lb-fgts.
 
+# In cluster controller
+To run the controller in cluster with the good role/serviceaccount etc.
+```
+kubectl create namespace fortinet
+kubectl apply -n fortinet -f serviceaccount.yaml -f ctrl-role.yml -f rolebinding.yaml 
+kubectl  -n fortinet -f deployment.yaml
+```
 
 
 Annotation or config-map on the controllers for the FGT ip.

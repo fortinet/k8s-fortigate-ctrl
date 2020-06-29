@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fortigate-ctrl-fgtaz
+spec:
+  replicas: 1
+  # strategy is supposed to ensure 1 single conf server
+  selector:
+    matchLabels:
+      app: fortigate-ctrl-fgtaz
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: fortigate-ctrl-fgtaz
+    spec:
+      serviceAccountName: fortigate-ctrl
+      nodeSelector:
+        "beta.kubernetes.io/os": linux
+      restartPolicy: Always
+      containers:
+      - name: fortigate-ctrl-fgtaz
+        image: fortinetsolutioncse/k8s-fortigate-ctrl:latest
+        command:  ["python3", "-u", "/tmp/controller.py"]
+        env:
+        # Define the environment variable PYTHONUNBUFFERED=1;FGT_URL=fgtadmin:Fortin3t-aks@172.27.40.126;
+        - name: FGT_NAME
+          value: "fgt-az"
+        - name: FGT_URL
+          value: "fgtadmin:Fortin3t-aks@172.27.40.126"
