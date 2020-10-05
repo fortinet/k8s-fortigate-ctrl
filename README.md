@@ -9,7 +9,7 @@ Code provided as is (see License) PR are welcome
 - use loadbalancer annotation to implement LB in Fortigate
 - in python thanks https://github.com/karmab/samplecontroller/
 - and https://github.com/kubernetes-client/python especially examples
-- use fortiospai
+- use fortiosapi
 - Use one CRD per LB created
 - Allow multiple fortigates
 - create a loop watch endpoint changes -> change on FGT, once in while do a get.
@@ -45,7 +45,7 @@ To run the controller in cluster with the good role/serviceaccount etc.
 ```
 kubectl create namespace fortinet
 kubectl apply -n fortinet -f serviceaccount.yaml -f ctrl-role.yml -f rolebinding.yaml 
-kubectl  -n fortinet -f deployment.yaml
+kubectl apply -n fortinet -f deployment.yaml
 ```
 
 
